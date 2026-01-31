@@ -1,0 +1,11 @@
+server:
+  port: 8080
+
+spring:
+  rsocket:
+    server:
+      port: 7000
+      transport: tcp
+
+  mongodb:
+    uri: mongodb://admin:adminpass@localhost:27017/iot?authSource=admin

@@ -1,0 +1,8 @@
+server:
+  port: 8081
+
+iot:
+  producer:
+    host: localhost
+    port: 7000
+    route: iot.readings

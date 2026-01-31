@@ -24,7 +24,7 @@ public class SensorRuntimeRegistry {
 
     private final Sinks.Many<Sensor> newSensors = Sinks.many().multicast().onBackpressureBuffer();
 
-    private final Sinks.Many<Reading> readingsSink = Sinks.many().multicast().onBackpressureBuffer();
+    private final Sinks.Many<Reading> readingsSink = Sinks.many().multicast().onBackpressureBuffer(5000, false);
 
     private final ConcurrentHashMap<String, Disposable> running = new ConcurrentHashMap<>();
 
@@ -60,7 +60,10 @@ public class SensorRuntimeRegistry {
             var sub = sensorToReadings(s)
                     .flatMap(r -> readingRepo.save(toEntity(r)).thenReturn(r), 32)
                     .doOnNext(r -> readingsSink.tryEmitNext(r))
-                    .subscribe();
+                    .subscribe(
+                            v -> { },
+                            e -> System.out.println("[REGISTRY] sensor " + s.id() + " stream error: " + e)
+                    );
 
             return sub;
         });
@@ -86,6 +89,7 @@ public class SensorRuntimeRegistry {
         var initial = new SensorState(baseTemp, baseHum, 0, 0, Instant.now());
 
         return Flux.interval(s.period())
+                .onBackpressureLatest()
                 .scan(initial, (st, tick) -> evolve(st, baseTemp, baseHum))
                 .skip(1)
                 .map(st -> new Reading(
@@ -94,7 +98,11 @@ public class SensorRuntimeRegistry {
                         s.type(),
                         st.ts(),
                         valueByType(s.type(), st)
-                ));
+                ))
+                .onErrorResume(e -> {
+                    System.out.println("[REGISTRY] sensor " + s.id() + " error: " + e);
+                    return Flux.empty();
+                });
     }
 
     private SensorState evolve(SensorState st, double baseTemp, double baseHum) {

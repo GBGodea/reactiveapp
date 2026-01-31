@@ -4,66 +4,87 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>IoT Stream</title>
+
     <style>
         body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 20px; }
         header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
         button { padding: 8px 12px; cursor: pointer; }
         .pill { padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; }
-        .row { display:flex; gap:16px; flex-wrap:wrap; margin-top: 16px; }
-        .card { border:1px solid #eee; border-radius:12px; padding:12px; min-width: 320px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border-bottom: 1px solid #f0f0f0; padding: 8px; text-align: left; font-size: 14px; }
-        th { font-weight: 600; }
-        .muted { color:#666; font-size: 12px; }
-        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; }
-        .log { max-height: 360px; overflow:auto; background:#fafafa; border:1px solid #eee; border-radius:12px; padding:10px; }
-        .logline { border-bottom: 1px dashed #eee; padding: 6px 0; }
         .ok { color: #0a7; }
         .bad { color: #c33; }
+
+        .stack { display:flex; flex-direction:column; gap:16px; margin-top: 16px; }
+
+        .card { border:1px solid #eee; border-radius:12px; padding:12px; }
+        .cardHeader { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+        .muted { color:#666; font-size: 12px; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; }
+
+        .panel { display:flex; gap:16px; flex-wrap:wrap; margin-top: 10px; }
+        .chartBox { flex: 2; min-width: 420px; }
+        .logBox   { flex: 1; min-width: 320px; }
+
+        canvas {
+            width: 100%;
+            height: 220px;
+            border:1px solid #f0f0f0;
+            border-radius:10px;
+            background:#fafafa;
+            display:block;
+        }
+
+        .log {
+            max-height: 220px;
+            overflow:auto;
+            background:#fafafa;
+            border:1px solid #eee;
+            border-radius:10px;
+            padding:10px;
+        }
+
+        .logline { border-bottom: 1px dashed #eee; padding: 6px 0; }
         input[type="checkbox"] { transform: translateY(1px); }
+
+        .emptyState {
+            border: 1px dashed #ddd;
+            border-radius: 12px;
+            padding: 14px;
+            color: #666;
+            background: #fafafa;
+            margin-top: 16px;
+        }
     </style>
 </head>
+
 <body>
 <header>
     <h2 style="margin:0;">IoT Stream (SSE)</h2>
-    <span class="pill">Endpoint: <span class="mono">/api/stream</span></span>
+
+    <span class="pill">
+    Endpoint: <span class="mono">/api/stream</span>
+  </span>
+
     <button id="btnConnect">Подключиться</button>
     <button id="btnDisconnect" disabled>Отключиться</button>
+
     <span id="status" class="pill bad">OFFLINE</span>
 
     <label class="pill"><input id="fTemp" type="checkbox" checked> THERMOMETER</label>
-    <label class="pill"><input id="fHum" type="checkbox" checked> HUMIDITY</label>
-    <label class="pill"><input id="fMot" type="checkbox" checked> MOTION</label>
+    <label class="pill"><input id="fHum"  type="checkbox" checked> HUMIDITY</label>
+    <label class="pill"><input id="fMot"  type="checkbox" checked> MOTION</label>
+
+    <span class="pill">
+    Окно: <span class="mono"><span id="windowSec">60</span>s</span>
+  </span>
 </header>
 
-<div class="row">
-    <div class="card" style="flex: 2;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;">
-            <h3 style="margin:0;">Последние значения по датчикам</h3>
-            <div class="muted">Обновляется реактивно (scan + render)</div>
-        </div>
-        <table>
-            <thead>
-            <tr>
-                <th>sensorId</th>
-                <th>deviceId</th>
-                <th>type</th>
-                <th>value</th>
-                <th>ts</th>
-            </tr>
-            </thead>
-            <tbody id="tbody"></tbody>
-        </table>
-    </div>
-
-    <div class="card" style="flex: 1;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;">
-            <h3 style="margin:0;">Лог</h3>
-            <div class="muted">последние 200 событий</div>
-        </div>
-        <div id="log" class="log"></div>
-    </div>
+<div class="emptyState" id="emptyState">
+    Пока нет данных. Добавь сенсоры в первом микросервисе и открой поток /api/stream.
+    Как только начнут приходить readings — здесь появятся карточки по каждому sensorId.
 </div>
+
+<!-- JS будет динамически создавать карточки сенсоров сюда -->
+<div class="stack" id="cards"></div>
 
 <!-- RxJS 7 (UMD) -->
 <script src="https://unpkg.com/rxjs@7/dist/bundles/rxjs.umd.min.js"></script>

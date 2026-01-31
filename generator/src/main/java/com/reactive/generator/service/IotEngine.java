@@ -25,7 +25,7 @@ public class IotEngine {
             Sinks.many().multicast().onBackpressureBuffer();
 
     private final Sinks.Many<Reading> readingOut =
-            Sinks.many().multicast().onBackpressureBuffer();
+            Sinks.many().multicast().onBackpressureBuffer(5000, false);
 
     public IotEngine(SensorRepository sensorRepo, ReadingRepository readingRepo) {
         this.sensorRepo = sensorRepo;
@@ -35,24 +35,40 @@ public class IotEngine {
     @PostConstruct
     public void start() {
         Flux<Sensor> sensors = sensorRepo.findByEnabledTrue()
-                .concatWith(sensorAdds.asFlux())
-                // упрощение: считаем что sensorId уникален и новых "дубликатов" нет
+                .doOnSubscribe(s -> System.out.println("[ENGINE] load enabled sensors..."))
+                .doOnNext(s -> System.out.println("[ENGINE] initial sensor: id=" + s.id() + " type=" + s.type()))
+                .doOnError(e -> System.out.println("[ENGINE] sensorRepo error: " + e))
+                // ВАЖНО: если Mongo упадёт/не аутентифицируется, чтобы не убить весь concatWith
+                .onErrorResume(e -> Flux.empty())
+                .concatWith(
+                        sensorAdds.asFlux()
+                                .doOnNext(s -> System.out.println("[ENGINE] sensor add event: id=" + s.id() + " type=" + s.type()))
+                )
+                .filter(s -> s.enabled() && s.id() != null)
                 .distinct(Sensor::id);
 
-        // 1) Генерим readings
-        // 2) Реактивно сохраняем в Mongo
-        // 3) Параллельно пушим наружу для RSocket подписчиков
         sensors
                 .flatMap(this::sensorToReadings)
-                .flatMap(r -> readingRepo.save(toEntity(r)).thenReturn(r), 64)
-                .doOnNext(r -> readingOut.tryEmitNext(r))
-                .subscribe(); // запускаем реактивный граф (без блокировок)
-    }
-
-    public Mono<Sensor> addSensor(Sensor s) {
-        // Реактивно сохраняем, затем реактивно "сигналим" в поток генерации
-        return sensorRepo.save(s)
-                .doOnNext(saved -> sensorAdds.tryEmitNext(saved));
+                .doOnNext(r -> System.out.println("[ENGINE] generated: " + r))
+                .flatMap(r ->
+                                readingRepo.save(toEntity(r))
+                                        .doOnError(e -> System.out.println("[ENGINE] reading save error: " + e))
+                                        .onErrorResume(e -> Mono.empty())
+                                        .thenReturn(r),
+                        64
+                )
+                .doOnNext(r -> {
+                    var res = readingOut.tryEmitNext(r);
+                    if (res.isFailure()) {
+                        System.out.println("[ENGINE] emit failed: " + res + " reading=" + r);
+                    }
+                })
+                .doOnError(e -> System.out.println("[ENGINE] pipeline error (FATAL): " + e))
+                .subscribe(
+                        v -> {
+                        },
+                        e -> System.out.println("[ENGINE] subscribe error: " + e)
+                );
     }
 
     public Flux<Reading> readings() {
@@ -63,19 +79,27 @@ public class IotEngine {
         return new ReadingEntity(null, r.sensorId(), r.deviceId(), r.type(), r.ts(), r.value());
     }
 
+    public Mono<Sensor> addSensor(Sensor s) {
+        // Реактивно сохраняем, затем реактивно "сигналим" в поток генерации
+        return sensorRepo.save(s)
+                .doOnNext(sensorAdds::tryEmitNext);
+    }
+
     // ---------- генерация "плавных" данных ----------
-    private record State(double temp, double hum, int motion, int burstLeft) {}
+    private record State(double temp, double hum, int motion, int burstLeft) {
+    }
 
     private Flux<Reading> sensorToReadings(Sensor s) {
         if (!s.enabled()) return Flux.empty();
 
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
         double baseTemp = clamp(24 + rnd.nextDouble(-3, 3), 15, 35);
-        double baseHum  = clamp(60 + rnd.nextDouble(-4, 4), 50, 70);
+        double baseHum = clamp(60 + rnd.nextDouble(-4, 4), 50, 70);
 
         State init = new State(baseTemp, baseHum, 0, 0);
 
         return Flux.interval(s.period())
+                .onBackpressureLatest()
                 .scan(init, (st, tick) -> evolve(st, baseTemp, baseHum))
                 .skip(1)
                 .map(st -> new Reading(
@@ -84,12 +108,16 @@ public class IotEngine {
                         s.type(),
                         Instant.now(),
                         valueByType(s.type(), st)
-                ));
+                ))
+                .onErrorResume(e -> {
+                    System.out.println("[ENGINE] sensor " + s.id() + " stream error: " + e);
+                    return Flux.empty();
+                });
     }
 
     private State evolve(State st, double baseTemp, double baseHum) {
         double nextTemp = clamp(stepToward(st.temp, baseTemp, 0.08, 0.12), 15, 35);
-        double nextHum  = clamp(stepToward(st.hum,  baseHum,  0.05, 0.10), 50, 70);
+        double nextHum = clamp(stepToward(st.hum, baseHum, 0.05, 0.10), 50, 70);
 
         // motion “всплесками”
         ThreadLocalRandom r = ThreadLocalRandom.current();
@@ -115,8 +143,8 @@ public class IotEngine {
     private double valueByType(SensorType type, State st) {
         return switch (type) {
             case THERMOMETER -> round1(st.temp);
-            case HUMIDITY    -> round1(st.hum);
-            case MOTION      -> st.motion;
+            case HUMIDITY -> round1(st.hum);
+            case MOTION -> st.motion;
         };
     }
 
@@ -125,6 +153,11 @@ public class IotEngine {
         return value + k * (target - value) + noise;
     }
 
-    private static double round1(double x) { return Math.round(x * 10.0) / 10.0; }
-    private static double clamp(double v, double min, double max) { return Math.max(min, Math.min(max, v)); }
+    private static double round1(double x) {
+        return Math.round(x * 10.0) / 10.0;
+    }
+
+    private static double clamp(double v, double min, double max) {
+        return Math.max(min, Math.min(max, v));
+    }
 }

@@ -1,14 +1,41 @@
-let sessionSub = null;
-let disconnect$ = null;
-
 (() => {
-    const { Observable, Subject } = rxjs;
-    const { map, tap, filter, share, takeUntil } = rxjs.operators;
+    const {
+        Observable,
+        Subject,
+        BehaviorSubject,
+        from,
+        fromEvent,
+        of,
+        EMPTY,
+        merge,
+        defer
+    } = rxjs;
 
-    // UI
+    const {
+        map,
+        tap,
+        filter,
+        share,
+        takeUntil,
+        switchMap,
+        mergeMap,
+        catchError,
+        finalize,
+        distinctUntilChanged
+    } = rxjs.operators;
+
+    // ---- Config ----
+    const GEN_HTTP = window.GEN_HTTP || 'http://localhost:8080';
+
+    // ---- UI ----
     const btnConnect = document.getElementById('btnConnect');
     const btnDisconnect = document.getElementById('btnDisconnect');
+    const btnAddSensor = document.getElementById('btnAddSensor');
+    const btnReloadSensors = document.getElementById('btnReloadSensors');
+
     const statusEl = document.getElementById('status');
+    const genHttpLabel = document.getElementById('genHttpLabel');
+    if (genHttpLabel) genHttpLabel.textContent = GEN_HTTP;
 
     const fTemp = document.getElementById('fTemp');
     const fHum  = document.getElementById('fHum');
@@ -17,47 +44,45 @@ let disconnect$ = null;
     const windowSecEl = document.getElementById('windowSec');
     const cardsRoot = document.getElementById('cards');
 
-    let disconnect$ = new Subject();
+    const dlgSensor = document.getElementById('dlgSensor');
+    const sensorForm = document.getElementById('sensorForm');
+    const inpName = document.getElementById('inpName');
+    const selType = document.getElementById('selType');
+    const inpDeviceId = document.getElementById('inpDeviceId');
+    const inpPeriodSec = document.getElementById('inpPeriodSec');
 
-    // Settings
+    // must exist in HTML
+    const btnCancelSensor = document.getElementById('btnCancelSensor');
+    const btnCreateSensor = document.getElementById('btnCreateSensor');
+
+    // ---- Settings ----
     const WINDOW_MS = 60_000;
-    windowSecEl.textContent = String(WINDOW_MS / 1000);
+    if (windowSecEl) windowSecEl.textContent = String(WINDOW_MS / 1000);
     const MAX_LOG_LINES = 200;
 
-    // In-memory UI state (per sensorId)
-    // sensorId -> { type, deviceId, canvas, logEl, points: [{t,v}] }
-    const sensorsUI = new Map();
+    // ---- In-memory state ----
+    const sensorsUI = new Map();       // sensorId -> ui
+    const sensorsMeta = new Map();     // sensorId -> meta
+    const blockedSensors = new Set();  // sensorId -> ignore trailing readings
+    const cardSubs = new Map();        // sensorId -> Subscription (cardActions$ -> actions$)
 
+    // ---- Reactive buses ----
+    const actions$ = new Subject(); // {type, ...}
+    const ui$ = new Subject();      // {type:'toast', level:'error'|'info', text}
+    const online$ = new BehaviorSubject(false);
+
+    // ---- helpers ----
     function setStatus(online, text) {
+        if (!statusEl) return;
         statusEl.textContent = text;
         statusEl.classList.toggle('ok', online);
         statusEl.classList.toggle('bad', !online);
     }
 
-    // ---- SSE -> Observable ----
-    function sse$(url) {
-        return new Observable(subscriber => {
-            const es = new EventSource(url);
-
-            es.onopen = () => subscriber.next({ __type: 'open' });
-            es.onmessage = (evt) => subscriber.next({ __type: 'message', data: evt.data });
-            es.onerror = (err) => subscriber.next({ __type: 'error', err });
-
-            return () => es.close();
-        });
-    }
-
-    function parseReading(jsonStr) {
-        const r = JSON.parse(jsonStr);
-        r.value = Number(r.value);
-        r._t = Date.parse(r.ts);
-        return r;
-    }
-
     function typeAllowed(type) {
-        if (type === 'THERMOMETER') return fTemp.checked;
-        if (type === 'HUMIDITY') return fHum.checked;
-        if (type === 'MOTION') return fMot.checked;
+        if (type === 'THERMOMETER') return !!fTemp?.checked;
+        if (type === 'HUMIDITY') return !!fHum?.checked;
+        if (type === 'MOTION') return !!fMot?.checked;
         return true;
     }
 
@@ -66,8 +91,8 @@ let disconnect$ = null;
         return Number.isFinite(r.value) ? r.value.toFixed(1) : String(r.value);
     }
 
-    // ---- Logs ----
     function addLogLine(logEl, text) {
+        if (!logEl) return;
         const div = document.createElement('div');
         div.className = 'logline mono';
         div.textContent = text;
@@ -78,25 +103,21 @@ let disconnect$ = null;
         }
     }
 
-    // ---- Data window ----
     function keepWindow(points, nowMs) {
-        const from = nowMs - WINDOW_MS;
+        const fromT = nowMs - WINDOW_MS;
         let i = 0;
-        while (i < points.length && points[i].t < from) i++;
+        while (i < points.length && points[i].t < fromT) i++;
         return i === 0 ? points : points.slice(i);
     }
 
     // ---- Canvas drawing ----
-    function clear(ctx, w, h) {
-        ctx.clearRect(0, 0, w, h);
-    }
+    function clear(ctx, w, h) { ctx.clearRect(0, 0, w, h); }
 
     function drawAxes(ctx, w, h, yMin, yMax) {
         ctx.save();
         ctx.globalAlpha = 0.9;
         ctx.lineWidth = 1;
         ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-
         ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"';
         ctx.fillText(String(yMax), 6, 14);
         ctx.fillText(String(yMin), 6, h - 6);
@@ -136,7 +157,6 @@ let disconnect$ = null;
         const last = points[points.length - 1];
         const lx = x0 + ((last.t - t0) / span) * (x1 - x0);
         const ly = y1 - ((last.v - yMin) / (yMax - yMin)) * (y1 - y0);
-
         ctx.beginPath();
         ctx.arc(lx, ly, 4, 0, Math.PI * 2);
         ctx.fill();
@@ -160,7 +180,6 @@ let disconnect$ = null;
         const x0 = pad, x1 = w - pad;
         const y0 = pad, y1 = h - pad;
         const usableW = (x1 - x0);
-
         const barW = Math.max(2, Math.floor(usableW / Math.min(points.length, 240)));
 
         ctx.save();
@@ -174,7 +193,7 @@ let disconnect$ = null;
         ctx.restore();
     }
 
-    // ---- Dynamic cards per sensor ----
+    // ---- Cards ----
     function titleForType(type) {
         if (type === 'THERMOMETER') return 'Температура';
         if (type === 'HUMIDITY') return 'Влажность';
@@ -189,6 +208,12 @@ let disconnect$ = null;
         return { kind: 'line', yMin: 0, yMax: 1, unit: '' };
     }
 
+    function applyMetaToCard(ui, meta) {
+        if (!meta) return;
+        ui.titleEl.textContent = `${titleForType(meta.type)} · ${meta.name || meta.id}`;
+        ui.metaEl.textContent = `id: ${meta.id} · deviceId: ${meta.deviceId ?? ''} · period: ${meta.period ?? ''}`;
+    }
+
     function createSensorCard(sensorId, deviceId, type) {
         const section = document.createElement('section');
         section.className = 'card';
@@ -199,17 +224,61 @@ let disconnect$ = null;
         header.className = 'cardHeader';
 
         const left = document.createElement('div');
-        left.innerHTML = `
-      <h3 style="margin:0;">${titleForType(type)} · <span class="mono">${sensorId}</span></h3>
-      <div class="muted">deviceId: <span class="mono">${deviceId ?? ''}</span> · последние ${WINDOW_MS/1000}s</div>
-    `;
 
-        const right = document.createElement('div');
-        right.className = 'pill mono';
-        right.textContent = type;
+        const titleEl = document.createElement('h3');
+        titleEl.style.margin = '0';
+        titleEl.textContent = `${titleForType(type)} · ${sensorId}`;
+
+        const metaEl = document.createElement('div');
+        metaEl.className = 'muted';
+        metaEl.textContent = `id: ${sensorId} · deviceId: ${deviceId ?? ''} · последние ${WINDOW_MS / 1000}s`;
+
+        left.appendChild(titleEl);
+        left.appendChild(metaEl);
+
+        const rightBox = document.createElement('div');
+        rightBox.className = 'rightBox';
+
+        const typePill = document.createElement('div');
+        typePill.className = 'pill mono';
+        typePill.textContent = type;
+
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+
+        const biasEl = document.createElement('span');
+        biasEl.className = 'muted mono';
+        biasEl.textContent = 'bias: 0.0';
+
+        const deltaInput = document.createElement('input');
+        deltaInput.className = 'deltaInput mono';
+        deltaInput.type = 'number';
+        deltaInput.step = '0.1';
+        deltaInput.value = '1';
+
+        const btnPlus = document.createElement('button');
+        btnPlus.className = 'btnSmall';
+        btnPlus.textContent = '+Δ';
+
+        const btnMinus = document.createElement('button');
+        btnMinus.className = 'btnSmall';
+        btnMinus.textContent = '-Δ';
+
+        const btnDel = document.createElement('button');
+        btnDel.className = 'btnSmall btnDanger';
+        btnDel.textContent = 'Delete';
+
+        actions.appendChild(biasEl);
+        actions.appendChild(deltaInput);
+        actions.appendChild(btnPlus);
+        actions.appendChild(btnMinus);
+        actions.appendChild(btnDel);
+
+        rightBox.appendChild(typePill);
+        rightBox.appendChild(actions);
 
         header.appendChild(left);
-        header.appendChild(right);
+        header.appendChild(rightBox);
 
         const panel = document.createElement('div');
         panel.className = 'panel';
@@ -245,40 +314,61 @@ let disconnect$ = null;
 
         section.appendChild(header);
         section.appendChild(panel);
-
-        // Добавляем карточку в начало списка (новые сверху)
         cardsRoot.prepend(section);
 
-        return { section, canvas, logEl, points: [], type, deviceId };
+        const plus$ = fromEvent(btnPlus, 'click').pipe(
+            tap(e => e.preventDefault()),
+            map(() => Math.abs(Number(deltaInput.value || 1))),
+            map(d => ({ type: 'adjust', sensorId, delta: +d }))
+        );
+
+        const minus$ = fromEvent(btnMinus, 'click').pipe(
+            tap(e => e.preventDefault()),
+            map(() => Math.abs(Number(deltaInput.value || 1))),
+            map(d => ({ type: 'adjust', sensorId, delta: -d }))
+        );
+
+        const del$ = fromEvent(btnDel, 'click').pipe(
+            tap(e => e.preventDefault()),
+            map(() => ({ type: 'delete', sensorId }))
+        );
+
+        const cardActions$ = merge(plus$, minus$, del$);
+
+        const ui = { section, canvas, logEl, points: [], type, deviceId, titleEl, metaEl, biasEl };
+        const meta = sensorsMeta.get(sensorId);
+        if (meta) applyMetaToCard(ui, meta);
+
+        addLogLine(logEl, `[open] sensor card created`);
+        return { ui, cardActions$ };
     }
 
-    function ensureSensorUI(r) {
-        let ui = sensorsUI.get(r.sensorId);
+    function ensureSensorUI(reading) {
+        if (blockedSensors.has(reading.sensorId)) return null;
+
+        let ui = sensorsUI.get(reading.sensorId);
         if (!ui) {
-            ui = createSensorCard(r.sensorId, r.deviceId, r.type);
-            sensorsUI.set(r.sensorId, ui);
-            addLogLine(ui.logEl, `[open] sensor card created`);
-        } else {
-            // если вдруг deviceId/type пришли позже — обновим
-            ui.type = ui.type || r.type;
-            ui.deviceId = ui.deviceId || r.deviceId;
+            const created = createSensorCard(reading.sensorId, reading.deviceId, reading.type);
+            ui = created.ui;
+            sensorsUI.set(reading.sensorId, ui);
+
+            // централизованная подписка: cardActions$ -> actions$
+            const sub = created.cardActions$.subscribe(actions$);
+            cardSubs.set(reading.sensorId, sub);
         }
         return ui;
     }
 
     function redraw(ui) {
         const range = rangeForType(ui.type);
-        if (range.kind === 'line') {
-            drawLineChart(ui.canvas, ui.points, range.yMin, range.yMax);
-        } else {
-            drawBarChart(ui.canvas, ui.points);
-        }
+        if (range.kind === 'line') drawLineChart(ui.canvas, ui.points, range.yMin, range.yMax);
+        else drawBarChart(ui.canvas, ui.points);
     }
 
     function onReading(r) {
         const ui = ensureSensorUI(r);
+        if (!ui) return;
 
-        // если тип отключён чекбоксом — просто не обновляем (карточку можно скрывать, если захочешь)
         if (!typeAllowed(r.type)) return;
 
         const now = r._t;
@@ -291,76 +381,287 @@ let disconnect$ = null;
         addLogLine(ui.logEl, `[${r.type}] ${formatValue(r)}${suffix} @ ${r.ts}`);
     }
 
-    // ---- Connect logic ----
-    function connect() {
-        // если уже было подключение — сначала аккуратно закрываем
-        disconnect();
+    function refreshVisibility() {
+        for (const ui of sensorsUI.values()) {
+            ui.section.style.display = typeAllowed(ui.type) ? '' : 'none';
+        }
+    }
 
-        disconnect$ = new rxjs.Subject();
-
-        setStatus(false, 'CONNECTING...');
-        btnConnect.disabled = true;
-        btnDisconnect.disabled = false;
-
-        const base$ = sse$('/api/stream').pipe(
-            takeUntil(disconnect$),
-            tap(evt => {
-                if (evt.__type === 'open') {
-                    setStatus(true, 'ONLINE');
-                    // если у тебя отдельные логи по сенсорам — можно логировать только в консоль
-                    console.log('[SSE] open');
+    // ---- HTTP (Generator) ----
+    function genFetch$(path, options) {
+        return defer(() => {
+            const url = `${GEN_HTTP}${path}`;
+            return from(fetch(url, {
+                headers: { 'Content-Type': 'application/json' },
+                ...options
+            }));
+        }).pipe(
+            mergeMap(res => {
+                if (!res.ok) {
+                    return from(res.text().catch(() => '')).pipe(
+                        mergeMap(text => { throw new Error(`${res.status} ${res.statusText} :: ${text}`); })
+                    );
                 }
-                if (evt.__type === 'error') {
-                    setStatus(false, 'RECONNECTING...');
-                    console.log('[SSE] error/reconnecting');
-                }
-            }),
-            filter(evt => evt.__type === 'message'),
-            map(evt => parseReading(evt.data)),
-            share()
+                const ct = res.headers.get('content-type') || '';
+                if (ct.includes('application/json')) return from(res.json());
+                return of(null);
+            })
         );
+    }
 
-        // ВАЖНО: сохраняем подписку, чтобы потом явно закрыть
-        sessionSub = base$.subscribe({
-            next: r => onReading(r),     // твой обработчик: создает карточки, рисует, пишет лог
-            error: e => console.log('[base$] error', e),
-            complete: () => console.log('[base$] complete')
+    function loadSensorsMeta$() {
+        return genFetch$('/iot/list', { method: 'GET' }).pipe(
+            tap(list => {
+                const arr = Array.isArray(list) ? list : [];
+                sensorsMeta.clear();
+                for (const s of arr) sensorsMeta.set(String(s.id), s);
+
+                for (const [sensorId, ui] of sensorsUI.entries()) {
+                    const m = sensorsMeta.get(sensorId);
+                    if (m) applyMetaToCard(ui, m);
+                }
+                console.log('[GEN] sensors loaded:', arr.length);
+            }),
+            catchError(e => {
+                ui$.next({ type: 'toast', level: 'error', text: `Не удалось загрузить список сенсоров: ${e.message}` });
+                return EMPTY;
+            })
+        );
+    }
+
+    function adjust$(sensorId, delta) {
+        return genFetch$(`/iot/${encodeURIComponent(sensorId)}/adjust?delta=${encodeURIComponent(delta)}`, {
+            method: 'POST'
         });
     }
 
-    function disconnect() {
-        // 1) завершаем поток
-        if (disconnect$) {
-            disconnect$.next();
-            disconnect$.complete();
-            disconnect$ = null;
-        }
-
-        // 2) отписываемся (это гарантированно вызовет teardown в sse$ → es.close())
-        if (sessionSub) {
-            sessionSub.unsubscribe();
-            sessionSub = null;
-        }
-
-        setStatus(false, 'OFFLINE');
-        btnConnect.disabled = false;
-        btnDisconnect.disabled = true;
+    function deleteSensor$(sensorId) {
+        return genFetch$(`/iot/${encodeURIComponent(sensorId)}`, { method: 'DELETE' });
     }
 
-    btnConnect.addEventListener('click', connect);
-    btnDisconnect.addEventListener('click', disconnect);
+    function createSensorFromForm$() {
+        return defer(() => {
+            const name = String(inpName?.value || '').trim();
+            const type = String(selType?.value || '').trim();
+            const deviceId = String(inpDeviceId?.value || '').trim();
+            const periodSec = Number(inpPeriodSec?.value);
 
-    // можно обновлять видимость карточек при переключении чекбоксов (опционально)
-    function refreshVisibility() {
-        for (const ui of sensorsUI.values()) {
-            const visible = typeAllowed(ui.type);
-            ui.section.style.display = visible ? '' : 'none';
-        }
+            if (!name || !type || !deviceId || !(periodSec > 0)) {
+                throw new Error('Проверь поля: name/type/deviceId/period');
+            }
+
+            const payload = { name, type, deviceId, period: `PT${periodSec}S` };
+
+            return genFetch$('/iot/add', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+        });
     }
-    fTemp.addEventListener('change', refreshVisibility);
-    fHum.addEventListener('change', refreshVisibility);
-    fMot.addEventListener('change', refreshVisibility);
 
-    // auto connect
-    connect();
+    // ---- SSE ----
+    function sse$(url) {
+        return new Observable(subscriber => {
+            const es = new EventSource(url);
+            es.onopen = () => subscriber.next({ __type: 'open' });
+            es.onmessage = (evt) => subscriber.next({ __type: 'message', data: evt.data });
+            es.onerror = (err) => subscriber.next({ __type: 'error', err });
+            return () => es.close();
+        });
+    }
+
+    function parseReading(jsonStr) {
+        const r = JSON.parse(jsonStr);
+        r.value = Number(r.value);
+        r._t = Date.parse(r.ts);
+        return r;
+    }
+
+    // ----------------------------------------
+    // UI events -> actions$ (reactive wiring)
+    // ----------------------------------------
+
+    const connectClick$ = fromEvent(btnConnect, 'click').pipe(map(() => ({ type: 'connect' })));
+    const disconnectClick$ = fromEvent(btnDisconnect, 'click').pipe(map(() => ({ type: 'disconnect' })));
+    const reloadClick$ = fromEvent(btnReloadSensors, 'click').pipe(map(() => ({ type: 'reload' })));
+
+    const addOpenClick$ = fromEvent(btnAddSensor, 'click').pipe(
+        tap(() => dlgSensor && dlgSensor.showModal()),
+        filter(() => false)
+    );
+
+    // Cancel: close/reset AND NEVER submit/add
+    const addCancelClick$ = btnCancelSensor
+        ? fromEvent(btnCancelSensor, 'click').pipe(
+            tap((e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (dlgSensor) dlgSensor.close();
+                if (sensorForm) sensorForm.reset();
+                if (inpPeriodSec) inpPeriodSec.value = '1';
+            }),
+            filter(() => false)
+        )
+        : EMPTY;
+
+    // Submit: ONLY if submitter is the Create button
+    const addSubmit$ = sensorForm
+        ? fromEvent(sensorForm, 'submit').pipe(
+            tap(e => e.preventDefault()),
+            filter(e => {
+                // If Cancel somehow triggers submit, this blocks it.
+                if (e.submitter) return e.submitter === btnCreateSensor;
+                // fallback
+                return document.activeElement === btnCreateSensor;
+            }),
+            map(() => ({ type: 'add' }))
+        )
+        : EMPTY;
+
+    const filters$ = merge(
+        fromEvent(fTemp, 'change'),
+        fromEvent(fHum, 'change'),
+        fromEvent(fMot, 'change')
+    ).pipe(
+        tap(refreshVisibility),
+        filter(() => false)
+    );
+
+    // actions producers
+    merge(connectClick$, disconnectClick$, reloadClick$, addSubmit$).subscribe(actions$);
+
+    // side-effects only
+    merge(addOpenClick$, addCancelClick$, filters$).subscribe();
+
+    // toasts (console for now)
+    ui$.pipe(
+        filter(x => x.type === 'toast'),
+        tap(x => console.log(`[UI:${x.level}] ${x.text}`))
+    ).subscribe();
+
+    // ----------------------------------------
+    // Session lifecycle (connect/disconnect)
+    // ----------------------------------------
+
+    const session$ = actions$.pipe(
+        filter(a => a.type === 'connect'),
+        tap(() => {
+            setStatus(false, 'CONNECTING...');
+            btnConnect.disabled = true;
+            btnDisconnect.disabled = false;
+            online$.next(true);
+        }),
+        switchMap(() => {
+            const stop$ = actions$.pipe(filter(a => a.type === 'disconnect'));
+
+            const meta$ = loadSensorsMeta$().pipe(takeUntil(stop$));
+
+            const stream$ = sse$('/api/stream').pipe(
+                takeUntil(stop$),
+                tap(evt => {
+                    if (evt.__type === 'open') setStatus(true, 'ONLINE');
+                    if (evt.__type === 'error') setStatus(false, 'RECONNECTING...');
+                }),
+                filter(evt => evt.__type === 'message'),
+                map(evt => parseReading(evt.data)),
+                tap(r => onReading(r)),
+                catchError(e => {
+                    ui$.next({ type: 'toast', level: 'error', text: `SSE error: ${e?.message || e}` });
+                    return EMPTY;
+                })
+            );
+
+            const crud$ = actions$.pipe(
+                takeUntil(stop$),
+                filter(a => a.type === 'reload' || a.type === 'add' || a.type === 'delete' || a.type === 'adjust'),
+                mergeMap(a => {
+                    if (a.type === 'reload') return loadSensorsMeta$();
+
+                    if (a.type === 'add') {
+                        return createSensorFromForm$().pipe(
+                            tap(() => {
+                                if (dlgSensor) dlgSensor.close();
+                                if (sensorForm) sensorForm.reset();
+                                if (inpPeriodSec) inpPeriodSec.value = '1';
+                            }),
+                            switchMap(() => loadSensorsMeta$()),
+                            catchError(err => {
+                                ui$.next({ type: 'toast', level: 'error', text: `Ошибка создания сенсора: ${err.message}` });
+                                return EMPTY;
+                            })
+                        );
+                    }
+
+                    if (a.type === 'delete') {
+                        const sensorId = a.sensorId;
+                        blockedSensors.add(sensorId);
+
+                        return deleteSensor$(sensorId).pipe(
+                            tap(() => {
+                                const sub = cardSubs.get(sensorId);
+                                if (sub) sub.unsubscribe();
+                                cardSubs.delete(sensorId);
+
+                                const existing = sensorsUI.get(sensorId);
+                                if (existing) {
+                                    existing.section.remove();
+                                    sensorsUI.delete(sensorId);
+                                }
+
+                                sensorsMeta.delete(sensorId);
+                            }),
+                            catchError(err => {
+                                const ui = sensorsUI.get(sensorId);
+                                if (ui) addLogLine(ui.logEl, `[delete] ERROR: ${err.message}`);
+                                ui$.next({ type: 'toast', level: 'error', text: `Ошибка удаления сенсора: ${err.message}` });
+                                blockedSensors.delete(sensorId);
+                                return EMPTY;
+                            })
+                        );
+                    }
+
+                    if (a.type === 'adjust') {
+                        const sensorId = a.sensorId;
+                        const delta = a.delta;
+                        const ui = sensorsUI.get(sensorId);
+
+                        return adjust$(sensorId, delta).pipe(
+                            tap(json => {
+                                if (ui && ui.biasEl && json && typeof json.bias === 'number') {
+                                    ui.biasEl.textContent = `bias: ${json.bias.toFixed(2)}`;
+                                }
+                                if (ui) addLogLine(ui.logEl, `[adjust] delta=${delta} => bias=${json?.bias}`);
+                            }),
+                            catchError(err => {
+                                if (ui) addLogLine(ui.logEl, `[adjust] ERROR: ${err.message}`);
+                                ui$.next({ type: 'toast', level: 'error', text: `Ошибка adjust: ${err.message}` });
+                                return EMPTY;
+                            })
+                        );
+                    }
+
+                    return EMPTY;
+                })
+            );
+
+            return merge(meta$, stream$, crud$).pipe(
+                finalize(() => {
+                    setStatus(false, 'OFFLINE');
+                    btnConnect.disabled = false;
+                    btnDisconnect.disabled = true;
+                    online$.next(false);
+                })
+            );
+        }),
+        share()
+    );
+
+    // start session stream
+    session$.subscribe();
+
+    // auto-connect once
+    actions$.next({ type: 'connect' });
+
+    // optional: monitor online flag
+    online$.pipe(distinctUntilChanged()).subscribe();
 })();

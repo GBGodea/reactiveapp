@@ -16,7 +16,7 @@
         .stack { display:flex; flex-direction:column; gap:16px; margin-top: 16px; }
 
         .card { border:1px solid #eee; border-radius:12px; padding:12px; }
-        .cardHeader { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+        .cardHeader { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
         .muted { color:#666; font-size: 12px; }
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; }
 
@@ -53,6 +53,20 @@
             background: #fafafa;
             margin-top: 16px;
         }
+
+        .rightBox { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+        .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .btnSmall { padding: 6px 10px; border-radius: 10px; border: 1px solid #eee; background:#fff; }
+        .btnDanger { border-color: #f2c0c0; }
+        .deltaInput { width: 90px; padding: 6px 8px; border-radius: 10px; border: 1px solid #eee; background:#fff; }
+        .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; font-size: 12px; color:#444; }
+
+        dialog { border: 1px solid #eee; border-radius: 14px; padding: 16px; width: min(560px, 92vw); }
+        dialog::backdrop { background: rgba(0,0,0,0.25); }
+        .formRow { display:flex; gap:12px; flex-wrap:wrap; margin: 10px 0; }
+        .formRow > label { flex: 1; min-width: 220px; display:flex; flex-direction:column; gap:6px; }
+        input, select { padding: 10px 10px; border-radius: 10px; border: 1px solid #eee; }
+        .formActions { display:flex; gap:10px; justify-content:flex-end; margin-top: 12px; }
     </style>
 </head>
 
@@ -61,11 +75,14 @@
     <h2 style="margin:0;">IoT Stream (SSE)</h2>
 
     <span class="pill">
-    Endpoint: <span class="mono">/api/stream</span>
-  </span>
+      Endpoint: <span class="mono">/api/stream</span>
+    </span>
 
     <button id="btnConnect">Подключиться</button>
     <button id="btnDisconnect" disabled>Отключиться</button>
+
+    <button id="btnAddSensor">Добавить сенсор</button>
+    <button id="btnReloadSensors">Обновить сенсоры</button>
 
     <span id="status" class="pill bad">OFFLINE</span>
 
@@ -74,8 +91,12 @@
     <label class="pill"><input id="fMot"  type="checkbox" checked> MOTION</label>
 
     <span class="pill">
-    Окно: <span class="mono"><span id="windowSec">60</span>s</span>
-  </span>
+      Окно: <span class="mono"><span id="windowSec">60</span>s</span>
+    </span>
+
+    <span class="pill">
+      GEN_HTTP: <span class="mono" id="genHttpLabel"></span>
+    </span>
 </header>
 
 <div class="emptyState" id="emptyState">
@@ -83,10 +104,54 @@
     Как только начнут приходить readings — здесь появятся карточки по каждому sensorId.
 </div>
 
-<!-- JS будет динамически создавать карточки сенсоров сюда -->
 <div class="stack" id="cards"></div>
 
-<!-- RxJS 7 (UMD) -->
+<dialog id="dlgSensor">
+    <form method="dialog" id="sensorForm">
+        <h3 style="margin:0;">Добавить сенсор</h3>
+        <div class="muted" style="margin-top:6px;">
+            Запрос будет отправлен на <span class="mono">POST /iot/add</span>.
+            Period вводится как число секунд (можно дробное): <span class="kbd">0.2</span> → <span class="kbd">PT0.2S</span>
+        </div>
+
+        <div class="formRow">
+            <label>
+                Имя (name)
+                <input id="inpName" required placeholder="THERMOFAST" />
+            </label>
+            <label>
+                Тип (type)
+                <select id="selType" required>
+                    <option value="THERMOMETER">THERMOMETER</option>
+                    <option value="HUMIDITY">HUMIDITY</option>
+                    <option value="MOTION">MOTION</option>
+                </select>
+            </label>
+        </div>
+
+        <div class="formRow">
+            <label>
+                Device ID (deviceId)
+                <input id="inpDeviceId" required placeholder="7" />
+            </label>
+            <label>
+                Period seconds (period)
+                <input id="inpPeriodSec" type="number" step="0.001" min="0.001" required value="1" />
+            </label>
+        </div>
+
+        <div class="formActions">
+            <button class="btnSmall" type="button" id="btnCancelSensor">Отмена</button>
+            <button class="btnSmall" id="btnCreateSensor" type="submit">Создать</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- Можно поменять порт/хост первого микросервиса здесь -->
+<script>
+    window.GEN_HTTP = window.GEN_HTTP || 'http://localhost:8080';
+</script>
+
 <script src="https://unpkg.com/rxjs@7/dist/bundles/rxjs.umd.min.js"></script>
 <script src="/app.js"></script>
 </body>

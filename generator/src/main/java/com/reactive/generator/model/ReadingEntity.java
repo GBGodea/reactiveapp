@@ -1,6 +1,5 @@
 package com.reactive.generator.model;
 
-import com.reactive.generator.model.SensorType;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 

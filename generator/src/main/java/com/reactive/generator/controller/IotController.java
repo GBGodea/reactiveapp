@@ -17,6 +17,7 @@ public class IotController {
 
     public IotController(IotEngine engine) { this.engine = engine; }
 
+    // Добавление нового сенсора(термометр, влажность, движение)
     @PostMapping("/add")
     public Mono<Sensor> add(@RequestBody Mono<SensorCreateRequest> request) {
         return request
@@ -24,21 +25,24 @@ public class IotController {
                 .flatMap(engine::addSensor);
     }
 
+    // Позволяет получить метаданные сенсоров(имя, deviceId и т.д.)
     @GetMapping("/list")
     public Flux<Sensor> list() {
         return engine.listSensors();
     }
 
+    // Удаление сенсора(Удаляет поток сенсора и возвращает void)
     @DeleteMapping("/{id}")
     public Mono<Void> delete(@PathVariable String id) {
         return engine.deleteSensor(id);
     }
 
+    // Обёртка для возврата ответа
     public record AdjustResponse(String sensorId, double bias) { }
 
+    // Обновление значения сенсора
     @PostMapping("/{id}/adjust")
     public Mono<AdjustResponse> adjust(@PathVariable String id, @RequestParam double delta) {
-        // если хочешь строго 404 — проверим наличие
         return engine.listSensors()
                 .filter(s -> id.equals(s.id()))
                 .next()

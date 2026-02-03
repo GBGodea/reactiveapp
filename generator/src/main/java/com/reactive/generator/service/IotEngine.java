@@ -34,7 +34,7 @@ public class IotEngine {
     // runtime: какие сенсоры сейчас “крутятся”
     private final ConcurrentHashMap<String, Disposable> running = new ConcurrentHashMap<>();
 
-    // “update values”: калибровка/смещение значения сенсора (in-memory)
+    // “update values”: калибровка/смещение значения сенсора
     private final ConcurrentHashMap<String, Double> biasBySensorId = new ConcurrentHashMap<>();
 
     public IotEngine(SensorRepository sensorRepo, ReadingRepository readingRepo) {
@@ -74,7 +74,6 @@ public class IotEngine {
     }
 
     public Mono<Sensor> addSensor(Sensor s) {
-        // Реактивно сохраняем, затем реактивно “сигналим” в runtime
         return sensorRepo.save(s)
                 .doOnNext(sensorAdds::tryEmitNext);
     }
@@ -85,12 +84,10 @@ public class IotEngine {
                 .then();
     }
 
-    // update values: прибавить/убавить “bias” (in-memory)
     public Mono<Double> adjustBias(String sensorId, double delta) {
         return Mono.fromSupplier(() -> biasBySensorId.merge(sensorId, delta, Double::sum));
     }
 
-    // ---------- runtime control ----------
     private void startIfAbsent(Sensor s) {
         if (!s.enabled()) return;
         if (s.id() == null) return;
@@ -136,7 +133,7 @@ public class IotEngine {
         return new ReadingEntity(null, r.sensorId(), r.deviceId(), r.type(), r.ts(), r.value());
     }
 
-    // ---------- генерация “плавных” данных ----------
+    // генерация данных
     private record State(double temp, double hum, int motion, int burstLeft) { }
 
     private Flux<Reading> sensorToReadings(Sensor s) {
@@ -180,7 +177,6 @@ public class IotEngine {
         double nextTemp = clamp(stepToward(st.temp, baseTemp, 0.08, 0.12), 15, 35);
         double nextHum  = clamp(stepToward(st.hum,  baseHum,  0.05, 0.10), 50, 70);
 
-        // motion “всплесками”
         ThreadLocalRandom r = ThreadLocalRandom.current();
         int burstLeft = st.burstLeft;
         int motion;

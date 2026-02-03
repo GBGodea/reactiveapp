@@ -24,10 +24,8 @@
         distinctUntilChanged
     } = rxjs.operators;
 
-    // ---- Config ----
     const GEN_HTTP = window.GEN_HTTP || 'http://localhost:8080';
 
-    // ---- UI ----
     const btnConnect = document.getElementById('btnConnect');
     const btnDisconnect = document.getElementById('btnDisconnect');
     const btnAddSensor = document.getElementById('btnAddSensor');
@@ -51,27 +49,22 @@
     const inpDeviceId = document.getElementById('inpDeviceId');
     const inpPeriodSec = document.getElementById('inpPeriodSec');
 
-    // must exist in HTML
     const btnCancelSensor = document.getElementById('btnCancelSensor');
     const btnCreateSensor = document.getElementById('btnCreateSensor');
 
-    // ---- Settings ----
     const WINDOW_MS = 60_000;
     if (windowSecEl) windowSecEl.textContent = String(WINDOW_MS / 1000);
     const MAX_LOG_LINES = 200;
 
-    // ---- In-memory state ----
-    const sensorsUI = new Map();       // sensorId -> ui
-    const sensorsMeta = new Map();     // sensorId -> meta
-    const blockedSensors = new Set();  // sensorId -> ignore trailing readings
-    const cardSubs = new Map();        // sensorId -> Subscription (cardActions$ -> actions$)
+    const sensorsUI = new Map();
+    const sensorsMeta = new Map();
+    const blockedSensors = new Set();
+    const cardSubs = new Map();
 
-    // ---- Reactive buses ----
-    const actions$ = new Subject(); // {type, ...}
-    const ui$ = new Subject();      // {type:'toast', level:'error'|'info', text}
+    const actions$ = new Subject();
+    const ui$ = new Subject();
     const online$ = new BehaviorSubject(false);
 
-    // ---- helpers ----
     function setStatus(online, text) {
         if (!statusEl) return;
         statusEl.textContent = text;
@@ -110,7 +103,6 @@
         return i === 0 ? points : points.slice(i);
     }
 
-    // ---- Canvas drawing ----
     function clear(ctx, w, h) { ctx.clearRect(0, 0, w, h); }
 
     function drawAxes(ctx, w, h, yMin, yMax) {
@@ -193,7 +185,6 @@
         ctx.restore();
     }
 
-    // ---- Cards ----
     function titleForType(type) {
         if (type === 'THERMOMETER') return 'Температура';
         if (type === 'HUMIDITY') return 'Влажность';
@@ -352,7 +343,6 @@
             ui = created.ui;
             sensorsUI.set(reading.sensorId, ui);
 
-            // централизованная подписка: cardActions$ -> actions$
             const sub = created.cardActions$.subscribe(actions$);
             cardSubs.set(reading.sensorId, sub);
         }
@@ -387,7 +377,6 @@
         }
     }
 
-    // ---- HTTP (Generator) ----
     function genFetch$(path, options) {
         return defer(() => {
             const url = `${GEN_HTTP}${path}`;
@@ -459,7 +448,6 @@
         });
     }
 
-    // ---- SSE ----
     function sse$(url) {
         return new Observable(subscriber => {
             const es = new EventSource(url);
@@ -477,10 +465,6 @@
         return r;
     }
 
-    // ----------------------------------------
-    // UI events -> actions$ (reactive wiring)
-    // ----------------------------------------
-
     const connectClick$ = fromEvent(btnConnect, 'click').pipe(map(() => ({ type: 'connect' })));
     const disconnectClick$ = fromEvent(btnDisconnect, 'click').pipe(map(() => ({ type: 'disconnect' })));
     const reloadClick$ = fromEvent(btnReloadSensors, 'click').pipe(map(() => ({ type: 'reload' })));
@@ -490,7 +474,6 @@
         filter(() => false)
     );
 
-    // Cancel: close/reset AND NEVER submit/add
     const addCancelClick$ = btnCancelSensor
         ? fromEvent(btnCancelSensor, 'click').pipe(
             tap((e) => {
@@ -504,14 +487,11 @@
         )
         : EMPTY;
 
-    // Submit: ONLY if submitter is the Create button
     const addSubmit$ = sensorForm
         ? fromEvent(sensorForm, 'submit').pipe(
             tap(e => e.preventDefault()),
             filter(e => {
-                // If Cancel somehow triggers submit, this blocks it.
                 if (e.submitter) return e.submitter === btnCreateSensor;
-                // fallback
                 return document.activeElement === btnCreateSensor;
             }),
             map(() => ({ type: 'add' }))
@@ -527,21 +507,14 @@
         filter(() => false)
     );
 
-    // actions producers
     merge(connectClick$, disconnectClick$, reloadClick$, addSubmit$).subscribe(actions$);
 
-    // side-effects only
     merge(addOpenClick$, addCancelClick$, filters$).subscribe();
 
-    // toasts (console for now)
     ui$.pipe(
         filter(x => x.type === 'toast'),
         tap(x => console.log(`[UI:${x.level}] ${x.text}`))
     ).subscribe();
-
-    // ----------------------------------------
-    // Session lifecycle (connect/disconnect)
-    // ----------------------------------------
 
     const session$ = actions$.pipe(
         filter(a => a.type === 'connect'),
@@ -656,12 +629,7 @@
         share()
     );
 
-    // start session stream
     session$.subscribe();
-
-    // auto-connect once
     actions$.next({ type: 'connect' });
-
-    // optional: monitor online flag
     online$.pipe(distinctUntilChanged()).subscribe();
 })();

@@ -63,6 +63,7 @@
 
         dialog { border: 1px solid #eee; border-radius: 14px; padding: 16px; width: min(560px, 92vw); }
         dialog::backdrop { background: rgba(0,0,0,0.25); }
+        .formError { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(204,51,51,0.10); border: 1px solid rgba(204,51,51,0.35); color: #c33; }
         .formRow { display:flex; gap:12px; flex-wrap:wrap; margin: 10px 0; }
         .formRow > label { flex: 1; min-width: 220px; display:flex; flex-direction:column; gap:6px; }
         input, select { padding: 10px 10px; border-radius: 10px; border: 1px solid #eee; }
@@ -114,6 +115,8 @@
             Period вводится как число секунд (можно дробное): <span class="kbd">0.2</span> → <span class="kbd">PT0.2S</span>
         </div>
 
+        <div id="sensorFormError" class="formError" style="display:none;"></div>
+
         <div class="formRow">
             <label>
                 Имя (name)
@@ -147,7 +150,6 @@
     </form>
 </dialog>
 
-<!-- Можно поменять порт/хост первого микросервиса здесь -->
 <script>
     window.GEN_HTTP = window.GEN_HTTP || 'http://localhost:8080';
 </script>

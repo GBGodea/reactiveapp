@@ -23,18 +23,14 @@ public class IotEngine {
     private final SensorRepository sensorRepo;
     private final ReadingRepository readingRepo;
 
-    // события добавления сенсоров
     private final Sinks.Many<Sensor> sensorAdds =
             Sinks.many().multicast().onBackpressureBuffer();
 
-    // общий поток readings (для RSocket)
     private final Sinks.Many<Reading> readingOut =
             Sinks.many().multicast().onBackpressureBuffer(5000, false);
 
-    // runtime: какие сенсоры сейчас “крутятся”
     private final ConcurrentHashMap<String, Disposable> running = new ConcurrentHashMap<>();
 
-    // “update values”: калибровка/смещение значения сенсора
     private final ConcurrentHashMap<String, Double> biasBySensorId = new ConcurrentHashMap<>();
 
     public IotEngine(SensorRepository sensorRepo, ReadingRepository readingRepo) {
@@ -71,6 +67,10 @@ public class IotEngine {
 
     public Flux<Sensor> listSensors() {
         return sensorRepo.findAll();
+    }
+
+    public Mono<Boolean> existsDeviceId(String deviceId) {
+        return sensorRepo.existsByDeviceId(deviceId);
     }
 
     public Mono<Sensor> addSensor(Sensor s) {
@@ -133,7 +133,6 @@ public class IotEngine {
         return new ReadingEntity(null, r.sensorId(), r.deviceId(), r.type(), r.ts(), r.value());
     }
 
-    // генерация данных
     private record State(double temp, double hum, int motion, int burstLeft) { }
 
     private Flux<Reading> sensorToReadings(Sensor s) {
@@ -154,7 +153,6 @@ public class IotEngine {
                     double bias = biasBySensorId.getOrDefault(s.id(), 0.0);
                     double v = raw + bias;
 
-                    // аккуратная нормализация под тип
                     if (s.type() == SensorType.THERMOMETER) v = clamp(v, 15, 35);
                     if (s.type() == SensorType.HUMIDITY) v = clamp(v, 0, 100);
                     if (s.type() == SensorType.MOTION) v = (v >= 0.5) ? 1 : 0;

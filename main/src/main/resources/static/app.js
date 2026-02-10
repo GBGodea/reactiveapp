@@ -48,6 +48,7 @@
     const selType = document.getElementById('selType');
     const inpDeviceId = document.getElementById('inpDeviceId');
     const inpPeriodSec = document.getElementById('inpPeriodSec');
+    const sensorFormError = document.getElementById('sensorFormError');
 
     const btnCancelSensor = document.getElementById('btnCancelSensor');
     const btnCreateSensor = document.getElementById('btnCreateSensor');
@@ -71,6 +72,25 @@
         statusEl.classList.toggle('ok', online);
         statusEl.classList.toggle('bad', !online);
     }
+
+    function showSensorFormError(msg) {
+        if (!sensorFormError) return;
+        const text = String(msg || '').trim();
+        sensorFormError.textContent = text;
+        sensorFormError.style.display = text ? '' : 'none';
+    }
+
+    function deviceIdExists(deviceId) {
+        const d = String(deviceId ?? '').trim();
+        if (!d) return false;
+        for (const s of sensorsMeta.values()) {
+            const sd = String(s?.deviceId ?? '').trim();
+            if (sd === d) return true;
+        }
+        return false;
+    }
+
+
 
     function typeAllowed(type) {
         if (type === 'THERMOMETER') return !!fTemp?.checked;
@@ -308,19 +328,19 @@
         cardsRoot.prepend(section);
 
         const plus$ = fromEvent(btnPlus, 'click').pipe(
-            tap(e => e.preventDefault()),
+            tap(e => { e.preventDefault(); showSensorFormError(''); }),
             map(() => Math.abs(Number(deltaInput.value || 1))),
             map(d => ({ type: 'adjust', sensorId, delta: +d }))
         );
 
         const minus$ = fromEvent(btnMinus, 'click').pipe(
-            tap(e => e.preventDefault()),
+            tap(e => { e.preventDefault(); showSensorFormError(''); }),
             map(() => Math.abs(Number(deltaInput.value || 1))),
             map(d => ({ type: 'adjust', sensorId, delta: -d }))
         );
 
         const del$ = fromEvent(btnDel, 'click').pipe(
-            tap(e => e.preventDefault()),
+            tap(e => { e.preventDefault(); showSensorFormError(''); }),
             map(() => ({ type: 'delete', sensorId }))
         );
 
@@ -439,6 +459,13 @@
                 throw new Error('Проверь поля: name/type/deviceId/period');
             }
 
+            if (deviceIdExists(deviceId)) {
+                const msg = `Нельзя создать сенсор: deviceId=${deviceId} уже существует`;
+                showSensorFormError(msg);
+                throw new Error(msg);
+            }
+
+
             const payload = { name, type, deviceId, period: `PT${periodSec}S` };
 
             return genFetch$('/iot/add', {
@@ -470,7 +497,7 @@
     const reloadClick$ = fromEvent(btnReloadSensors, 'click').pipe(map(() => ({ type: 'reload' })));
 
     const addOpenClick$ = fromEvent(btnAddSensor, 'click').pipe(
-        tap(() => dlgSensor && dlgSensor.showModal()),
+        tap(() => { showSensorFormError(''); dlgSensor && dlgSensor.showModal(); }),
         filter(() => false)
     );
 
@@ -482,6 +509,7 @@
                 if (dlgSensor) dlgSensor.close();
                 if (sensorForm) sensorForm.reset();
                 if (inpPeriodSec) inpPeriodSec.value = '1';
+                showSensorFormError('');
             }),
             filter(() => false)
         )
@@ -489,7 +517,7 @@
 
     const addSubmit$ = sensorForm
         ? fromEvent(sensorForm, 'submit').pipe(
-            tap(e => e.preventDefault()),
+            tap(e => { e.preventDefault(); showSensorFormError(''); }),
             filter(e => {
                 if (e.submitter) return e.submitter === btnCreateSensor;
                 return document.activeElement === btnCreateSensor;
@@ -507,9 +535,23 @@
         filter(() => false)
     );
 
+    const deviceIdHint$ = inpDeviceId
+        ? fromEvent(inpDeviceId, 'input').pipe(
+            map(() => String(inpDeviceId.value || '').trim()),
+            tap(d => {
+                if (!dlgSensor || !dlgSensor.open) return;
+                if (!d) return showSensorFormError('');
+                if (deviceIdExists(d)) showSensorFormError(`deviceId=${d} уже существует`);
+                else showSensorFormError('');
+            }),
+            filter(() => false)
+        )
+        : EMPTY;
+
+
     merge(connectClick$, disconnectClick$, reloadClick$, addSubmit$).subscribe(actions$);
 
-    merge(addOpenClick$, addCancelClick$, filters$).subscribe();
+    merge(addOpenClick$, addCancelClick$, filters$, deviceIdHint$).subscribe();
 
     ui$.pipe(
         filter(x => x.type === 'toast'),
@@ -556,10 +598,16 @@
                                 if (dlgSensor) dlgSensor.close();
                                 if (sensorForm) sensorForm.reset();
                                 if (inpPeriodSec) inpPeriodSec.value = '1';
+                                showSensorFormError('');
                             }),
                             switchMap(() => loadSensorsMeta$()),
                             catchError(err => {
-                                ui$.next({ type: 'toast', level: 'error', text: `Ошибка создания сенсора: ${err.message}` });
+                                const raw = String(err?.message || err || '');
+                                const msg = (raw.includes('409') || raw.toLowerCase().includes('deviceid'))
+                                    ? 'Нельзя создать сенсор: deviceId уже существует'
+                                    : `Ошибка создания сенсора: ${raw}`;
+                                showSensorFormError(msg);
+                                ui$.next({ type: 'toast', level: 'error', text: msg });
                                 return EMPTY;
                             })
                         );

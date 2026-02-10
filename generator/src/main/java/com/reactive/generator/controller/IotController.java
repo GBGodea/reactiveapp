@@ -17,30 +17,37 @@ public class IotController {
 
     public IotController(IotEngine engine) { this.engine = engine; }
 
-    // Добавление нового сенсора(термометр, влажность, движение)
     @PostMapping("/add")
     public Mono<Sensor> add(@RequestBody Mono<SensorCreateRequest> request) {
-        return request
-                .map(r -> new Sensor(null, r.name(), r.type(), r.deviceId(), r.period(), true))
-                .flatMap(engine::addSensor);
+        return request.flatMap(r ->
+                engine.existsDeviceId(r.deviceId())
+                        .flatMap(exists -> {
+                            if (exists) {
+                                return Mono.error(new ResponseStatusException(
+                                        HttpStatus.CONFLICT,
+                                        "Нельзя создать сенсор: deviceId=" + r.deviceId() + " уже существует"
+                                ));
+                            }
+
+                            Sensor s = new Sensor(null, r.name(), r.type(), r.deviceId(), r.period(), true);
+                            return engine.addSensor(s);
+                        })
+        );
     }
 
-    // Позволяет получить метаданные сенсоров(имя, deviceId и т.д.)
+
     @GetMapping("/list")
     public Flux<Sensor> list() {
         return engine.listSensors();
     }
 
-    // Удаление сенсора(Удаляет поток сенсора и возвращает void)
     @DeleteMapping("/{id}")
     public Mono<Void> delete(@PathVariable String id) {
         return engine.deleteSensor(id);
     }
 
-    // Обёртка для возврата ответа
     public record AdjustResponse(String sensorId, double bias) { }
 
-    // Обновление значения сенсора
     @PostMapping("/{id}/adjust")
     public Mono<AdjustResponse> adjust(@PathVariable String id, @RequestParam double delta) {
         return engine.listSensors()

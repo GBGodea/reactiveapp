@@ -38,7 +38,6 @@ public class ProducerClient {
                 .repeatWhen(companion -> companion.delayElements(Duration.ofSeconds(1)))
                 .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(10)));
 
-
         this.shared = source
                 .publish()
                 .refCount(1);

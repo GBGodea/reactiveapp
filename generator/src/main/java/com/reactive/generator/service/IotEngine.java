@@ -15,9 +15,12 @@ import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class IotEngine {
@@ -26,16 +29,20 @@ public class IotEngine {
     private final ReadingRepository readingRepo;
 
     private final Sinks.Many<Sensor> sensorAdds =
-            Sinks.many().multicast().onBackpressureBuffer(10000, false);
+            Sinks.many().multicast().onBackpressureBuffer();
 
     private final Sinks.Many<Reading> readingOut =
-            Sinks.many().multicast().onBackpressureBuffer(10000, false);
+            Sinks.many().multicast().onBackpressureBuffer(50_000, false);
 
-    private final ConcurrentHashMap<String, Disposable> running = new ConcurrentHashMap<>();
-
-    private final ConcurrentHashMap<String, Double> biasBySensorId = new ConcurrentHashMap<>();
+    private final Sinks.Many<Reading> persistIn =
+            Sinks.many().multicast().onBackpressureBuffer(50_000, false);
 
     private final Scheduler emitScheduler = Schedulers.newSingle("reading-out");
+
+    private final ConcurrentHashMap<String, Disposable> running = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Double> biasBySensorId = new ConcurrentHashMap<>();
+
+    private final AtomicLong droppedPersist = new AtomicLong(0);
 
     public IotEngine(SensorRepository sensorRepo, ReadingRepository readingRepo) {
         this.sensorRepo = sensorRepo;
@@ -44,31 +51,34 @@ public class IotEngine {
 
     @PostConstruct
     public void start() {
-
         Flux<Sensor> sensors = sensorRepo.findByEnabledTrue()
                 .doOnError(e -> System.out.println("[ENGINE] sensorRepo error: " + e))
                 .onErrorResume(e -> Flux.empty())
-                .concatWith(
-                        sensorAdds.asFlux()
-                )
+                .concatWith(sensorAdds.asFlux())
                 .filter(s -> s.enabled() && s.id() != null)
                 .distinct(Sensor::id);
 
         sensors
                 .doOnNext(this::startIfAbsent)
                 .subscribe(
-                        v -> {
-                        },
+                        v -> { },
                         e -> System.out.println("[ENGINE] sensors subscribe error: " + e)
                 );
+
+        persistIn.asFlux()
+                .onBackpressureDrop(r -> droppedPersist.incrementAndGet())
+                .bufferTimeout(1000, Duration.ofSeconds(1))
+                .filter(batch -> !batch.isEmpty())
+                .concatMap(this::saveBatchSafely)
+                .onErrorResume(e -> {
+                    System.out.println("[ENGINE] persist pipeline error: " + e);
+                    return Mono.empty();
+                })
+                .subscribe();
     }
 
     public Flux<Reading> readings() {
         return readingOut.asFlux();
-    }
-
-    public Mono<Boolean> existsSensorId(String id) {
-        return sensorRepo.existsById(id);
     }
 
     public Flux<Sensor> listSensors() {
@@ -82,6 +92,10 @@ public class IotEngine {
 
     public Mono<Boolean> existsDeviceId(String deviceId) {
         return sensorRepo.existsByDeviceId(deviceId);
+    }
+
+    public Mono<Boolean> existsSensorId(String sensorId) {
+        return sensorRepo.existsById(sensorId);
     }
 
     public Mono<Void> deleteSensor(String sensorId) {
@@ -99,30 +113,31 @@ public class IotEngine {
         if (s.id() == null) return;
 
         running.computeIfAbsent(s.id(), id -> {
+            System.out.println("[ENGINE] start sensor stream: id=" + id + " type=" + s.type());
+
             return sensorToReadings(s)
-                    .flatMap(r ->
-                                    readingRepo.save(toEntity(r))
-                                            .doOnError(e -> System.out.println("[ENGINE] reading save error: " + e))
-                                            .onErrorResume(e -> Mono.empty())
-                                            .thenReturn(r),
-                            4
-                    )
                     .publishOn(emitScheduler)
                     .doOnNext(r -> {
                         var res = readingOut.tryEmitNext(r);
                         if (res.isFailure()) {
-                            System.out.println("[ENGINE] emit failed: " + res + " reading=" + r);
+                            System.out.println("[ENGINE] realtime emit failed: " + res + " reading=" + r);
+                        }
+
+                        var pres = persistIn.tryEmitNext(r);
+                        if (pres.isFailure()) {
+                            long n = droppedPersist.incrementAndGet();
+                            if (n % 10_000 == 0) {
+                                System.out.println("[ENGINE] persist drop total=" + n + " last=" + pres);
+                            }
                         }
                     })
                     .doOnError(e -> System.out.println("[ENGINE] sensor pipeline error: " + e))
                     .subscribe(
-                            v -> {
-                            },
+                            v -> { },
                             e -> System.out.println("[ENGINE] sensor " + id + " subscribe error: " + e)
                     );
         });
     }
-
 
     private void stopRuntime(String sensorId) {
         Disposable d = running.remove(sensorId);
@@ -133,12 +148,20 @@ public class IotEngine {
         biasBySensorId.remove(sensorId);
     }
 
+    private Mono<Void> saveBatchSafely(List<Reading> batch) {
+        return readingRepo.saveAll(Flux.fromIterable(batch).map(this::toEntity))
+                .then()
+                .onErrorResume(e -> {
+                    System.out.println("[ENGINE] save batch failed size=" + batch.size() + " err=" + e);
+                    return Mono.empty();
+                });
+    }
+
     private ReadingEntity toEntity(Reading r) {
         return new ReadingEntity(null, r.sensorId(), r.deviceId(), r.type(), r.ts(), r.value());
     }
 
-    private record State(double temp, double hum, int motion, int burstLeft) {
-    }
+    private record State(double temp, double hum, int motion, int burstLeft) { }
 
     private Flux<Reading> sensorToReadings(Sensor s) {
         if (!s.enabled()) return Flux.empty();
@@ -158,7 +181,6 @@ public class IotEngine {
                     double bias = biasBySensorId.getOrDefault(s.id(), 0.0);
                     double v = raw + bias;
 
-                    // аккуратная нормализация под тип
                     if (s.type() == SensorType.THERMOMETER) v = clamp(v, 15, 35);
                     if (s.type() == SensorType.HUMIDITY) v = clamp(v, 0, 100);
                     if (s.type() == SensorType.MOTION) v = (v >= 0.5) ? 1 : 0;
@@ -179,7 +201,7 @@ public class IotEngine {
 
     private State evolve(State st, double baseTemp, double baseHum) {
         double nextTemp = clamp(stepToward(st.temp, baseTemp, 0.08, 0.12), 15, 35);
-        double nextHum = clamp(stepToward(st.hum, baseHum, 0.05, 0.10), 50, 70);
+        double nextHum  = clamp(stepToward(st.hum,  baseHum,  0.05, 0.10), 50, 70);
 
         ThreadLocalRandom r = ThreadLocalRandom.current();
         int burstLeft = st.burstLeft;

@@ -11,6 +11,12 @@ import reactor.util.retry.Retry;
 
 @Service
 public class ProducerClient {
+
+    private final RSocketRequester.Builder builder;
+    private final String host;
+    private final int port;
+    private final String defaultRoute;
+
     private final Flux<Reading> shared;
 
     public ProducerClient(
@@ -19,24 +25,12 @@ public class ProducerClient {
             @Value("${iot.producer.port}") int port,
             @Value("${iot.producer.route}") String route
     ) {
-        Flux<Reading> source = Flux.usingWhen(
-                        Mono.fromSupplier(() -> builder
-                                .rsocketConnector(conn -> conn
-                                        .keepAlive(Duration.ofSeconds(20), Duration.ofSeconds(90))
-                                        .reconnect(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
-                                                .maxBackoff(Duration.ofSeconds(10)))
-                                )
-                                .tcp(host, port)
-                        ),
-                        requester -> requester.route(route)
-                                .retrieveFlux(Reading.class),
-                        requester -> Mono.fromRunnable(requester::dispose),
-                        (requester, err) -> Mono.fromRunnable(requester::dispose),
-                        requester -> Mono.fromRunnable(requester::dispose)
-                )
-                .repeatWhen(companion -> companion.delayElements(Duration.ofSeconds(1)))
-                .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(10)));
+        this.builder = builder;
+        this.host = host;
+        this.port = port;
+        this.defaultRoute = route;
 
+        Flux<Reading> source = connectAndRetrieve(defaultRoute, null);
 
         this.shared = source
                 .publish()
@@ -45,5 +39,34 @@ public class ProducerClient {
 
     public Flux<Reading> readings() {
         return shared;
+    }
+
+    public Flux<Reading> readingsByDevices(String devicesExpr) {
+        String expr = (devicesExpr == null) ? "" : devicesExpr;
+        return connectAndRetrieve("iot.readingsByDevices", expr);
+    }
+
+    private Flux<Reading> connectAndRetrieve(String route, Object data) {
+        return Flux.usingWhen(
+                        Mono.fromSupplier(() -> builder
+                                .rsocketConnector(conn -> conn
+                                        .keepAlive(Duration.ofSeconds(20), Duration.ofSeconds(90))
+                                        .reconnect(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
+                                                .maxBackoff(Duration.ofSeconds(10)))
+                                )
+                                .tcp(host, port)
+                        ),
+                        requester -> {
+                            if (data == null) {
+                                return requester.route(route).retrieveFlux(Reading.class);
+                            }
+                            return requester.route(route).data(data).retrieveFlux(Reading.class);
+                        },
+                        requester -> Mono.fromRunnable(requester::dispose),
+                        (requester, err) -> Mono.fromRunnable(requester::dispose),
+                        requester -> Mono.fromRunnable(requester::dispose)
+                )
+                .repeatWhen(companion -> companion.delayElements(Duration.ofSeconds(1)))
+                .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(10)));
     }
 }

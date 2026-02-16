@@ -7,7 +7,7 @@
 
     <style>
         body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 20px; }
-        header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+        .topHeader { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
         button { padding: 8px 12px; cursor: pointer; }
         .pill { padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; }
         .ok { color: #0a7; }
@@ -43,7 +43,9 @@
         }
 
         .logline { border-bottom: 1px dashed #eee; padding: 6px 0; }
-        input[type="checkbox"] { transform: translateY(1px); }
+
+        input[type="checkbox"] { transform: translateY(1px); padding: 0; }
+        input:not([type="checkbox"]), select { padding: 10px 10px; border-radius: 10px; border: 1px solid #eee; }
 
         .emptyState {
             border: 1px dashed #ddd;
@@ -65,27 +67,28 @@
         dialog::backdrop { background: rgba(0,0,0,0.25); }
         .formRow { display:flex; gap:12px; flex-wrap:wrap; margin: 10px 0; }
         .formRow > label { flex: 1; min-width: 220px; display:flex; flex-direction:column; gap:6px; }
-        input, select { padding: 10px 10px; border-radius: 10px; border: 1px solid #eee; }
         .formActions { display:flex; gap:10px; justify-content:flex-end; margin-top: 12px; }
     </style>
 </head>
 
 <body>
-<header>
+<header class="topHeader">
     <h2 style="margin:0;">IoT Stream (SSE)</h2>
 
     <span class="pill">
-      Endpoint: <span class="mono">/api/stream</span>
-    </span>
+    Endpoint: <span class="mono">/api/stream</span>
+  </span>
 
     <label class="pill">
-        deviceId: <input id="inpDevicePick" class="mono" placeholder="4,5,10-100" style="width: 160px; padding:4px 6px;">
+        deviceId:
+        <input id="inpDevicePick" class="mono" placeholder="4,5,10-100"
+               style="width: 160px; padding:4px 6px;">
     </label>
     <button id="btnApply">Применить</button>
 
     <span class="pill">
-      Выбор: <span id="devicePickInfo" class="mono">—</span>
-    </span>
+    Выбор: <span id="devicePickInfo" class="mono">—</span>
+  </span>
 
     <button id="btnConnect">Подключиться</button>
     <button id="btnDisconnect" disabled>Отключиться</button>
@@ -100,12 +103,12 @@
     <label class="pill"><input id="fMot"  type="checkbox" checked> MOTION</label>
 
     <span class="pill">
-      Окно: <span class="mono"><span id="windowSec">60</span>s</span>
-    </span>
+    Окно: <span class="mono"><span id="windowSec">60</span>s</span>
+  </span>
 
     <span class="pill">
-      GEN_HTTP: <span class="mono" id="genHttpLabel"></span>
-    </span>
+    GEN_HTTP: <span class="mono" id="genHttpLabel"></span>
+  </span>
 </header>
 
 <div class="emptyState" id="emptyState">
@@ -156,7 +159,6 @@
     </form>
 </dialog>
 
-<!-- Можно поменять порт/хост первого микросервиса здесь -->
 <script>
     window.GEN_HTTP = window.GEN_HTTP || 'http://localhost:8080';
 </script>

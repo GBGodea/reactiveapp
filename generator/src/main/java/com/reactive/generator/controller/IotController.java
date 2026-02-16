@@ -35,7 +35,6 @@ public class IotController {
         );
     }
 
-
     @GetMapping("/list")
     public Flux<Sensor> list() {
         return engine.listSensors();
@@ -59,5 +58,4 @@ public class IotController {
                 })
                 .map(b -> new AdjustResponse(id, b));
     }
-
 }

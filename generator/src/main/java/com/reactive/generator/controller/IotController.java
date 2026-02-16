@@ -50,11 +50,14 @@ public class IotController {
 
     @PostMapping("/{id}/adjust")
     public Mono<AdjustResponse> adjust(@PathVariable String id, @RequestParam double delta) {
-        return engine.listSensors()
-                .filter(s -> id.equals(s.id()))
-                .next()
-                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Sensor not found: " + id)))
-                .then(engine.adjustBias(id, delta))
+        return engine.existsSensorId(id)
+                .flatMap(exists -> {
+                    if (!exists) {
+                        return Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Sensor not found: " + id));
+                    }
+                    return engine.adjustBias(id, delta);
+                })
                 .map(b -> new AdjustResponse(id, b));
     }
+
 }

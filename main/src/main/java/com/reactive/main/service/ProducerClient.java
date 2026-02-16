@@ -29,14 +29,14 @@ public class ProducerClient {
                                 .tcp(host, port)
                         ),
                         requester -> requester.route(route)
-                                .retrieveFlux(Reading.class)
-                                .doFinally(st -> System.out.println("[RSocket] route terminated: " + st)),
+                                .retrieveFlux(Reading.class),
                         requester -> Mono.fromRunnable(requester::dispose),
                         (requester, err) -> Mono.fromRunnable(requester::dispose),
                         requester -> Mono.fromRunnable(requester::dispose)
                 )
                 .repeatWhen(companion -> companion.delayElements(Duration.ofSeconds(1)))
                 .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(10)));
+
 
         this.shared = source
                 .publish()

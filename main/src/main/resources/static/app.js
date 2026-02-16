@@ -1,31 +1,10 @@
 (() => {
-    const {
-        Observable,
-        Subject,
-        BehaviorSubject,
-        from,
-        fromEvent,
-        of,
-        EMPTY,
-        merge,
-        defer
-    } = rxjs;
-
-    const {
-        map,
-        tap,
-        filter,
-        share,
-        takeUntil,
-        switchMap,
-        mergeMap,
-        catchError,
-        finalize,
-        distinctUntilChanged
-    } = rxjs.operators;
+    const { Observable, Subject, BehaviorSubject, from, fromEvent, of, EMPTY, merge, defer } = rxjs;
+    const { map, tap, filter, takeUntil, switchMap, mergeMap, catchError, finalize, distinctUntilChanged, share } = rxjs.operators;
 
     const GEN_HTTP = window.GEN_HTTP || 'http://localhost:8080';
 
+    // UI elements
     const btnConnect = document.getElementById('btnConnect');
     const btnDisconnect = document.getElementById('btnDisconnect');
     const btnAddSensor = document.getElementById('btnAddSensor');
@@ -36,8 +15,8 @@
     if (genHttpLabel) genHttpLabel.textContent = GEN_HTTP;
 
     const fTemp = document.getElementById('fTemp');
-    const fHum  = document.getElementById('fHum');
-    const fMot  = document.getElementById('fMot');
+    const fHum = document.getElementById('fHum');
+    const fMot = document.getElementById('fMot');
 
     const windowSecEl = document.getElementById('windowSec');
     const cardsRoot = document.getElementById('cards');
@@ -48,23 +27,98 @@
     const selType = document.getElementById('selType');
     const inpDeviceId = document.getElementById('inpDeviceId');
     const inpPeriodSec = document.getElementById('inpPeriodSec');
-    const sensorFormError = document.getElementById('sensorFormError');
 
     const btnCancelSensor = document.getElementById('btnCancelSensor');
     const btnCreateSensor = document.getElementById('btnCreateSensor');
+
+    // deviceId filter controls
+    const inpDevicePick = document.getElementById('inpDevicePick');
+    const btnApply = document.getElementById('btnApply');
+    const devicePickInfo = document.getElementById('devicePickInfo');
 
     const WINDOW_MS = 60_000;
     if (windowSecEl) windowSecEl.textContent = String(WINDOW_MS / 1000);
     const MAX_LOG_LINES = 200;
 
-    const sensorsUI = new Map();
-    const sensorsMeta = new Map();
-    const blockedSensors = new Set();
+    // State
+    const sensorsUI = new Map();     // sensorId -> ui
+    const sensorsMeta = new Map();   // sensorId -> meta
+    const blockedSensors = new Set();// deleted sensorIds
     const cardSubs = new Map();
 
     const actions$ = new Subject();
     const ui$ = new Subject();
     const online$ = new BehaviorSubject(false);
+
+    // --- deviceId filter state (IMPORTANT: declared before any function uses it)
+    let deviceExpr = '';
+    /** @type {{a:number,b:number}[]} */
+    let deviceRanges = [];
+
+    function parseDeviceRanges(expr) {
+        const s = String(expr || '').trim();
+        if (!s) return [];
+
+        const parts = s.split(',').map(x => x.trim()).filter(Boolean);
+        const ranges = [];
+
+        for (const p of parts) {
+            if (p.includes('-')) {
+                const [a0, b0] = p.split('-').map(x => x.trim());
+                const a = Number(a0), b = Number(b0);
+                if (Number.isFinite(a) && Number.isFinite(b)) {
+                    const lo = Math.min(a, b), hi = Math.max(a, b);
+                    ranges.push({ a: Math.trunc(lo), b: Math.trunc(hi) });
+                }
+            } else {
+                const v = Number(p);
+                if (Number.isFinite(v)) {
+                    const n = Math.trunc(v);
+                    ranges.push({ a: n, b: n });
+                }
+            }
+        }
+
+        // merge overlapping/adjacent ranges
+        ranges.sort((r1, r2) => r1.a - r2.a);
+        const merged = [];
+        for (const r of ranges) {
+            const last = merged[merged.length - 1];
+            if (!last) merged.push({ a: r.a, b: r.b });
+            else if (r.a <= last.b + 1) last.b = Math.max(last.b, r.b);
+            else merged.push({ a: r.a, b: r.b });
+        }
+        return merged;
+    }
+
+    function hasDeviceFilter() {
+        return deviceRanges.length > 0;
+    }
+
+    function deviceAllowed(deviceId) {
+        if (!hasDeviceFilter()) return true;
+        const n = Number(deviceId);
+        if (!Number.isFinite(n)) return false;
+        const x = Math.trunc(n);
+        for (const r of deviceRanges) {
+            if (x >= r.a && x <= r.b) return true;
+        }
+        return false;
+    }
+
+    function setDeviceFilter(expr) {
+        deviceExpr = String(expr || '').trim();
+        deviceRanges = parseDeviceRanges(deviceExpr);
+
+        if (devicePickInfo) devicePickInfo.textContent = hasDeviceFilter() ? deviceExpr : '—';
+
+        // если оффлайн — не даём случайно подключиться ко всему
+        if (!online$.value && btnConnect) {
+            btnConnect.disabled = !hasDeviceFilter();
+        }
+
+        refreshVisibility();
+    }
 
     function setStatus(online, text) {
         if (!statusEl) return;
@@ -73,35 +127,11 @@
         statusEl.classList.toggle('bad', !online);
     }
 
-    function showSensorFormError(msg) {
-        if (!sensorFormError) return;
-        const text = String(msg || '').trim();
-        sensorFormError.textContent = text;
-        sensorFormError.style.display = text ? '' : 'none';
-    }
-
-    function deviceIdExists(deviceId) {
-        const d = String(deviceId ?? '').trim();
-        if (!d) return false;
-        for (const s of sensorsMeta.values()) {
-            const sd = String(s?.deviceId ?? '').trim();
-            if (sd === d) return true;
-        }
-        return false;
-    }
-
-
-
     function typeAllowed(type) {
         if (type === 'THERMOMETER') return !!fTemp?.checked;
         if (type === 'HUMIDITY') return !!fHum?.checked;
         if (type === 'MOTION') return !!fMot?.checked;
         return true;
-    }
-
-    function formatValue(r) {
-        if (r.type === 'MOTION') return String(r.value >= 1 ? 1 : 0);
-        return Number.isFinite(r.value) ? r.value.toFixed(1) : String(r.value);
     }
 
     function addLogLine(logEl, text) {
@@ -110,10 +140,7 @@
         div.className = 'logline mono';
         div.textContent = text;
         logEl.prepend(div);
-
-        while (logEl.childNodes.length > MAX_LOG_LINES) {
-            logEl.removeChild(logEl.lastChild);
-        }
+        while (logEl.childNodes.length > MAX_LOG_LINES) logEl.removeChild(logEl.lastChild);
     }
 
     function keepWindow(points, nowMs) {
@@ -138,8 +165,7 @@
 
     function drawLineChart(canvas, points, yMin, yMax) {
         const ctx = canvas.getContext('2d');
-        const w = canvas.width;
-        const h = canvas.height;
+        const w = canvas.width, h = canvas.height;
 
         clear(ctx, w, h);
         drawAxes(ctx, w, h, yMin, yMax);
@@ -177,8 +203,7 @@
 
     function drawBarChart(canvas, points) {
         const ctx = canvas.getContext('2d');
-        const w = canvas.width;
-        const h = canvas.height;
+        const w = canvas.width, h = canvas.height;
 
         clear(ctx, w, h);
         drawAxes(ctx, w, h, 0, 1);
@@ -215,7 +240,7 @@
     function rangeForType(type) {
         if (type === 'THERMOMETER') return { kind: 'line', yMin: 15, yMax: 35, unit: '°C' };
         if (type === 'HUMIDITY') return { kind: 'line', yMin: 50, yMax: 70, unit: '' };
-        if (type === 'MOTION') return { kind: 'bar',  yMin: 0,  yMax: 1,  unit: '' };
+        if (type === 'MOTION') return { kind: 'bar', yMin: 0, yMax: 1, unit: '' };
         return { kind: 'line', yMin: 0, yMax: 1, unit: '' };
     }
 
@@ -230,6 +255,7 @@
         section.className = 'card';
         section.dataset.sensorId = sensorId;
         section.dataset.type = type;
+        section.dataset.deviceId = String(deviceId ?? '');
 
         const header = document.createElement('div');
         header.className = 'cardHeader';
@@ -305,10 +331,9 @@
         const hint = document.createElement('div');
         hint.className = 'muted';
         hint.style.marginTop = '6px';
-        hint.textContent =
-            range.kind === 'line'
-                ? `Диапазон: ${range.yMin}–${range.yMax} ${range.unit} · Линия`
-                : `0/1 · Столбики`;
+        hint.textContent = range.kind === 'line'
+            ? `Диапазон: ${range.yMin}–${range.yMax} ${range.unit} · Линия`
+            : `0/1 · Столбики`;
 
         chartBox.appendChild(canvas);
         chartBox.appendChild(hint);
@@ -328,19 +353,19 @@
         cardsRoot.prepend(section);
 
         const plus$ = fromEvent(btnPlus, 'click').pipe(
-            tap(e => { e.preventDefault(); showSensorFormError(''); }),
+            tap(e => e.preventDefault()),
             map(() => Math.abs(Number(deltaInput.value || 1))),
             map(d => ({ type: 'adjust', sensorId, delta: +d }))
         );
 
         const minus$ = fromEvent(btnMinus, 'click').pipe(
-            tap(e => { e.preventDefault(); showSensorFormError(''); }),
+            tap(e => e.preventDefault()),
             map(() => Math.abs(Number(deltaInput.value || 1))),
             map(d => ({ type: 'adjust', sensorId, delta: -d }))
         );
 
         const del$ = fromEvent(btnDel, 'click').pipe(
-            tap(e => { e.preventDefault(); showSensorFormError(''); }),
+            tap(e => e.preventDefault()),
             map(() => ({ type: 'delete', sensorId }))
         );
 
@@ -356,6 +381,9 @@
 
     function ensureSensorUI(reading) {
         if (blockedSensors.has(reading.sensorId)) return null;
+
+        // deviceId filter: не создаём UI для лишних устройств
+        if (!deviceAllowed(reading.deviceId)) return null;
 
         let ui = sensorsUI.get(reading.sensorId);
         if (!ui) {
@@ -388,12 +416,13 @@
         redraw(ui);
 
         const suffix = (r.type === 'THERMOMETER') ? '°C' : '';
-        addLogLine(ui.logEl, `[${r.type}] ${formatValue(r)}${suffix} @ ${r.ts}`);
+        addLogLine(ui.logEl, `[${r.type}] ${Number.isFinite(r.value) ? r.value.toFixed(1) : r.value}${suffix} @ ${r.ts}`);
     }
 
     function refreshVisibility() {
         for (const ui of sensorsUI.values()) {
-            ui.section.style.display = typeAllowed(ui.type) ? '' : 'none';
+            const ok = typeAllowed(ui.type) && deviceAllowed(ui.deviceId);
+            ui.section.style.display = ok ? '' : 'none';
         }
     }
 
@@ -429,7 +458,6 @@
                     const m = sensorsMeta.get(sensorId);
                     if (m) applyMetaToCard(ui, m);
                 }
-                console.log('[GEN] sensors loaded:', arr.length);
             }),
             catchError(e => {
                 ui$.next({ type: 'toast', level: 'error', text: `Не удалось загрузить список сенсоров: ${e.message}` });
@@ -439,9 +467,7 @@
     }
 
     function adjust$(sensorId, delta) {
-        return genFetch$(`/iot/${encodeURIComponent(sensorId)}/adjust?delta=${encodeURIComponent(delta)}`, {
-            method: 'POST'
-        });
+        return genFetch$(`/iot/${encodeURIComponent(sensorId)}/adjust?delta=${encodeURIComponent(delta)}`, { method: 'POST' });
     }
 
     function deleteSensor$(sensorId) {
@@ -459,19 +485,8 @@
                 throw new Error('Проверь поля: name/type/deviceId/period');
             }
 
-            if (deviceIdExists(deviceId)) {
-                const msg = `Нельзя создать сенсор: deviceId=${deviceId} уже существует`;
-                showSensorFormError(msg);
-                throw new Error(msg);
-            }
-
-
             const payload = { name, type, deviceId, period: `PT${periodSec}S` };
-
-            return genFetch$('/iot/add', {
-                method: 'POST',
-                body: JSON.stringify(payload)
-            });
+            return genFetch$('/iot/add', { method: 'POST', body: JSON.stringify(payload) });
         });
     }
 
@@ -492,12 +507,13 @@
         return r;
     }
 
+    // --- Actions
     const connectClick$ = fromEvent(btnConnect, 'click').pipe(map(() => ({ type: 'connect' })));
     const disconnectClick$ = fromEvent(btnDisconnect, 'click').pipe(map(() => ({ type: 'disconnect' })));
     const reloadClick$ = fromEvent(btnReloadSensors, 'click').pipe(map(() => ({ type: 'reload' })));
 
     const addOpenClick$ = fromEvent(btnAddSensor, 'click').pipe(
-        tap(() => { showSensorFormError(''); dlgSensor && dlgSensor.showModal(); }),
+        tap(() => dlgSensor && dlgSensor.showModal()),
         filter(() => false)
     );
 
@@ -509,7 +525,6 @@
                 if (dlgSensor) dlgSensor.close();
                 if (sensorForm) sensorForm.reset();
                 if (inpPeriodSec) inpPeriodSec.value = '1';
-                showSensorFormError('');
             }),
             filter(() => false)
         )
@@ -517,13 +532,17 @@
 
     const addSubmit$ = sensorForm
         ? fromEvent(sensorForm, 'submit').pipe(
-            tap(e => { e.preventDefault(); showSensorFormError(''); }),
+            tap(e => e.preventDefault()),
             filter(e => {
                 if (e.submitter) return e.submitter === btnCreateSensor;
                 return document.activeElement === btnCreateSensor;
             }),
             map(() => ({ type: 'add' }))
         )
+        : EMPTY;
+
+    const applyClick$ = btnApply
+        ? fromEvent(btnApply, 'click').pipe(map(() => ({ type: 'apply' })))
         : EMPTY;
 
     const filters$ = merge(
@@ -535,31 +554,39 @@
         filter(() => false)
     );
 
-    const deviceIdHint$ = inpDeviceId
-        ? fromEvent(inpDeviceId, 'input').pipe(
-            map(() => String(inpDeviceId.value || '').trim()),
-            tap(d => {
-                if (!dlgSensor || !dlgSensor.open) return;
-                if (!d) return showSensorFormError('');
-                if (deviceIdExists(d)) showSensorFormError(`deviceId=${d} уже существует`);
-                else showSensorFormError('');
-            }),
-            filter(() => false)
-        )
-        : EMPTY;
-
-
-    merge(connectClick$, disconnectClick$, reloadClick$, addSubmit$).subscribe(actions$);
-
-    merge(addOpenClick$, addCancelClick$, filters$, deviceIdHint$).subscribe();
+    merge(connectClick$, disconnectClick$, reloadClick$, addSubmit$, applyClick$).subscribe(actions$);
+    merge(addOpenClick$, addCancelClick$, filters$).subscribe();
 
     ui$.pipe(
         filter(x => x.type === 'toast'),
         tap(x => console.log(`[UI:${x.level}] ${x.text}`))
     ).subscribe();
 
+    // Restore device filter from localStorage BEFORE auto connect
+    try {
+        const saved = localStorage.getItem('devicePickExpr');
+        if (saved && inpDevicePick) inpDevicePick.value = saved;
+        setDeviceFilter(inpDevicePick ? inpDevicePick.value : saved);
+    } catch (_) {
+        setDeviceFilter(inpDevicePick ? inpDevicePick.value : '');
+    }
+
+    // Session logic (reconnect safe)
+    let sessionId = 0;
+
     const session$ = actions$.pipe(
-        filter(a => a.type === 'connect'),
+        filter(a => a.type === 'connect' || a.type === 'apply'),
+        tap(a => {
+            if (a.type === 'apply') {
+                const expr = inpDevicePick ? inpDevicePick.value : '';
+                setDeviceFilter(expr);
+                try { localStorage.setItem('devicePickExpr', deviceExpr); } catch (_) {}
+            }
+        }),
+        filter(() => {
+            // connect/apply should not start if no filter (protect browser)
+            return hasDeviceFilter();
+        }),
         tap(() => {
             setStatus(false, 'CONNECTING...');
             btnConnect.disabled = true;
@@ -567,11 +594,16 @@
             online$.next(true);
         }),
         switchMap(() => {
+            const mySession = ++sessionId;
+
             const stop$ = actions$.pipe(filter(a => a.type === 'disconnect'));
 
             const meta$ = loadSensorsMeta$().pipe(takeUntil(stop$));
 
-            const stream$ = sse$('/api/stream').pipe(
+            const qs = encodeURIComponent(deviceExpr);
+            const url = `/api/stream?devices=${qs}`;
+
+            const stream$ = sse$(url).pipe(
                 takeUntil(stop$),
                 tap(evt => {
                     if (evt.__type === 'open') setStatus(true, 'ONLINE');
@@ -598,16 +630,10 @@
                                 if (dlgSensor) dlgSensor.close();
                                 if (sensorForm) sensorForm.reset();
                                 if (inpPeriodSec) inpPeriodSec.value = '1';
-                                showSensorFormError('');
                             }),
                             switchMap(() => loadSensorsMeta$()),
                             catchError(err => {
-                                const raw = String(err?.message || err || '');
-                                const msg = (raw.includes('409') || raw.toLowerCase().includes('deviceid'))
-                                    ? 'Нельзя создать сенсор: deviceId уже существует'
-                                    : `Ошибка создания сенсора: ${raw}`;
-                                showSensorFormError(msg);
-                                ui$.next({ type: 'toast', level: 'error', text: msg });
+                                ui$.next({ type: 'toast', level: 'error', text: `Ошибка создания сенсора: ${err.message}` });
                                 return EMPTY;
                             })
                         );
@@ -667,10 +693,13 @@
 
             return merge(meta$, stream$, crud$).pipe(
                 finalize(() => {
-                    setStatus(false, 'OFFLINE');
-                    btnConnect.disabled = false;
-                    btnDisconnect.disabled = true;
-                    online$.next(false);
+                    // prevent old finalize from overriding new session UI
+                    if (mySession === sessionId) {
+                        setStatus(false, 'OFFLINE');
+                        btnConnect.disabled = !hasDeviceFilter();
+                        btnDisconnect.disabled = true;
+                        online$.next(false);
+                    }
                 })
             );
         }),
@@ -678,6 +707,9 @@
     );
 
     session$.subscribe();
-    actions$.next({ type: 'connect' });
+
+    // Do not auto-connect unless filter exists; but keep parity with your old behavior:
+    if (hasDeviceFilter()) actions$.next({ type: 'connect' });
+
     online$.pipe(distinctUntilChanged()).subscribe();
 })();

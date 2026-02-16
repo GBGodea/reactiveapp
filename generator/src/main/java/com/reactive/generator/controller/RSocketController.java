@@ -14,10 +14,6 @@ public class RSocketController {
 
     @MessageMapping("iot.readings")
     public Flux<Reading> readings() {
-        System.out.println("[PRODUCER] iot.readings subscribed");
-        return engine.readings()
-                .doOnCancel(() -> System.out.println("[PRODUCER] iot.readings cancel"))
-                .doOnError(e -> System.out.println("[PRODUCER] iot.readings error: " + e))
-                .doOnComplete(() -> System.out.println("[PRODUCER] iot.readings complete"));
+        return engine.readings();
     }
 }

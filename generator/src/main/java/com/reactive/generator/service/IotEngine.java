@@ -12,6 +12,8 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,14 +26,16 @@ public class IotEngine {
     private final ReadingRepository readingRepo;
 
     private final Sinks.Many<Sensor> sensorAdds =
-            Sinks.many().multicast().onBackpressureBuffer();
+            Sinks.many().multicast().onBackpressureBuffer(10000, false);
 
     private final Sinks.Many<Reading> readingOut =
-            Sinks.many().multicast().onBackpressureBuffer(5000, false);
+            Sinks.many().multicast().onBackpressureBuffer(10000, false);
 
     private final ConcurrentHashMap<String, Disposable> running = new ConcurrentHashMap<>();
 
     private final ConcurrentHashMap<String, Double> biasBySensorId = new ConcurrentHashMap<>();
+
+    private final Scheduler emitScheduler = Schedulers.newSingle("reading-out");
 
     public IotEngine(SensorRepository sensorRepo, ReadingRepository readingRepo) {
         this.sensorRepo = sensorRepo;
@@ -42,13 +46,10 @@ public class IotEngine {
     public void start() {
 
         Flux<Sensor> sensors = sensorRepo.findByEnabledTrue()
-                .doOnSubscribe(s -> System.out.println("[ENGINE] load enabled sensors..."))
-                .doOnNext(s -> System.out.println("[ENGINE] initial sensor: id=" + s.id() + " type=" + s.type()))
                 .doOnError(e -> System.out.println("[ENGINE] sensorRepo error: " + e))
                 .onErrorResume(e -> Flux.empty())
                 .concatWith(
                         sensorAdds.asFlux()
-                                .doOnNext(s -> System.out.println("[ENGINE] sensor add event: id=" + s.id() + " type=" + s.type()))
                 )
                 .filter(s -> s.enabled() && s.id() != null)
                 .distinct(Sensor::id);
@@ -56,7 +57,8 @@ public class IotEngine {
         sensors
                 .doOnNext(this::startIfAbsent)
                 .subscribe(
-                        v -> { },
+                        v -> {
+                        },
                         e -> System.out.println("[ENGINE] sensors subscribe error: " + e)
                 );
     }
@@ -65,17 +67,21 @@ public class IotEngine {
         return readingOut.asFlux();
     }
 
-    public Flux<Sensor> listSensors() {
-        return sensorRepo.findAll();
+    public Mono<Boolean> existsSensorId(String id) {
+        return sensorRepo.existsById(id);
     }
 
-    public Mono<Boolean> existsDeviceId(String deviceId) {
-        return sensorRepo.existsByDeviceId(deviceId);
+    public Flux<Sensor> listSensors() {
+        return sensorRepo.findAll();
     }
 
     public Mono<Sensor> addSensor(Sensor s) {
         return sensorRepo.save(s)
                 .doOnNext(sensorAdds::tryEmitNext);
+    }
+
+    public Mono<Boolean> existsDeviceId(String deviceId) {
+        return sensorRepo.existsByDeviceId(deviceId);
     }
 
     public Mono<Void> deleteSensor(String sensorId) {
@@ -93,17 +99,15 @@ public class IotEngine {
         if (s.id() == null) return;
 
         running.computeIfAbsent(s.id(), id -> {
-            System.out.println("[ENGINE] start sensor stream: id=" + id + " type=" + s.type());
-
-            Disposable sub = sensorToReadings(s)
-                    .doOnNext(r -> System.out.println("[ENGINE] generated: " + r))
+            return sensorToReadings(s)
                     .flatMap(r ->
                                     readingRepo.save(toEntity(r))
                                             .doOnError(e -> System.out.println("[ENGINE] reading save error: " + e))
                                             .onErrorResume(e -> Mono.empty())
                                             .thenReturn(r),
-                            64
+                            4
                     )
+                    .publishOn(emitScheduler)
                     .doOnNext(r -> {
                         var res = readingOut.tryEmitNext(r);
                         if (res.isFailure()) {
@@ -112,13 +116,13 @@ public class IotEngine {
                     })
                     .doOnError(e -> System.out.println("[ENGINE] sensor pipeline error: " + e))
                     .subscribe(
-                            v -> { },
+                            v -> {
+                            },
                             e -> System.out.println("[ENGINE] sensor " + id + " subscribe error: " + e)
                     );
-
-            return sub;
         });
     }
+
 
     private void stopRuntime(String sensorId) {
         Disposable d = running.remove(sensorId);
@@ -133,7 +137,8 @@ public class IotEngine {
         return new ReadingEntity(null, r.sensorId(), r.deviceId(), r.type(), r.ts(), r.value());
     }
 
-    private record State(double temp, double hum, int motion, int burstLeft) { }
+    private record State(double temp, double hum, int motion, int burstLeft) {
+    }
 
     private Flux<Reading> sensorToReadings(Sensor s) {
         if (!s.enabled()) return Flux.empty();
@@ -153,6 +158,7 @@ public class IotEngine {
                     double bias = biasBySensorId.getOrDefault(s.id(), 0.0);
                     double v = raw + bias;
 
+                    // аккуратная нормализация под тип
                     if (s.type() == SensorType.THERMOMETER) v = clamp(v, 15, 35);
                     if (s.type() == SensorType.HUMIDITY) v = clamp(v, 0, 100);
                     if (s.type() == SensorType.MOTION) v = (v >= 0.5) ? 1 : 0;
@@ -173,7 +179,7 @@ public class IotEngine {
 
     private State evolve(State st, double baseTemp, double baseHum) {
         double nextTemp = clamp(stepToward(st.temp, baseTemp, 0.08, 0.12), 15, 35);
-        double nextHum  = clamp(stepToward(st.hum,  baseHum,  0.05, 0.10), 50, 70);
+        double nextHum = clamp(stepToward(st.hum, baseHum, 0.05, 0.10), 50, 70);
 
         ThreadLocalRandom r = ThreadLocalRandom.current();
         int burstLeft = st.burstLeft;
